@@ -6,6 +6,7 @@ __pycache__/
 *.so
 *.egg
 *.egg-info/
+/*.egg-info/
 dist/
 build/
 *.egg-info/
@@ -23,3 +24,4 @@ PKG-INFO
 MANIFEST
 SOURCES.txt
 
+uv.lock
