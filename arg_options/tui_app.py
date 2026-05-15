@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import traceback
 from typing import Any, Callable, Optional
 
@@ -11,9 +12,11 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Input, RichLog, Static, Select
 
 from arg_options import chain as chainmod
+from arg_options import discovery as dscmod
 from arg_options import journal as journalmod
 from arg_options import screen as screenmod
 from arg_options.alerts import run_alerts_once
@@ -67,6 +70,221 @@ def _populate_data_table(table: DataTable, df: pd.DataFrame, max_rows: int = 100
                 cells.append(str(v)[:72])
         table.add_row(*cells)
 
+
+# ---------------------------------------------------------------------------
+# Discovery detail popup (modal screen)
+# ---------------------------------------------------------------------------
+
+_STRATEGY_EXPLANATIONS = {
+    "mariposa": (
+        "Mariposa (Call Butterfly)",
+        "Comprás 1 Call abajo, vendés 2 Calls en el medio, comprás 1 Call arriba.",
+        "Ganás si el precio del activo se mantiene cerca del strike central al vencimiento.",
+        "Riesgo limitado al débito pagado. Beneficio máximo si el precio cierra exactamente en K2.",
+        "Conviene cuando esperás baja volatilidad y movimiento lateral.",
+    ),
+    "renta_ic": (
+        "Iron Condor",
+        "Vendés 1 Call y 1 Put fuera del dinero, comprando seguros más lejos.",
+        "Ganás si el precio se mantiene entre los strikes vendidos.",
+        "Riesgo limitado al ancho entre el strike vendido y el seguro, menos el crédito recibido.",
+        "Ideal para mercados laterales con alta probabilidad de éxito.",
+    ),
+    "credit_spread": (
+        "Credit Spread",
+        "Vendés una opción y comprás otra más lejana como seguro.",
+        "Ganás si el precio no supera el strike vendido.",
+        "Riesgo limitado. Estrategia direccional con alta probabilidad.",
+        "Usar cuando tenés una visión direccional pero querés probabilidad alta.",
+    ),
+    "calendar": (
+        "Calendar Spread",
+        "Vendés una opción de corto plazo y comprás la misma opción a largo plazo.",
+        "Ganás por la diferencia en la velocidad de deterioro temporal (Theta).",
+        "La opción corta pierde valor más rápido que la larga. Riesgo limitado.",
+        "Aprovechás la asimetría temporal. Mejor en mercados laterales.",
+    ),
+    "sintetico": (
+        "Sintético",
+        "Combinación de Call y Put en el mismo strike que replica tener el activo.",
+        "Sintético Long = Comprar Call + Vender Put (equivalente a tener la acción).",
+        "Sintético Short = Vender Call + Comprar Put (equivalente a estar corto).",
+        "Usar para eficiencia de capital o cuando la acción no está disponible.",
+    ),
+}
+
+
+class DiscoveryDetailScreen(ModalScreen[None]):
+    """Pantalla modal con detalle completo de una oportunidad."""
+
+    def __init__(self, opp: dscmod.Opportunity) -> None:
+        super().__init__()
+        self.opp = opp
+
+    def compose(self) -> ComposeResult:
+        opp = self.opp
+        title, desc, earning, risk, when = _STRATEGY_EXPLANATIONS.get(
+            opp.strategy,
+            (opp.strategy, "", "—", "—", "—"),
+        )
+
+        with Vertical():
+            yield Static(f"[bold cyan]{title}[/bold cyan]", id="detail_title")
+
+            yield Static(f"[bold]Root:[/bold] {opp.root}")
+            yield Static(f"[bold]Confianza:[/bold] [green]{opp.confidence:.0f}%[/green]")
+
+            yield Static("", classes="sep")
+            yield Static(f"[bold]¿Qué es?[/bold]\n{desc}")
+            yield Static(f"[bold]¿Cómo se gana?[/bold]\n{earning}")
+            yield Static(f"[bold]Riesgo:[/bold]\n{risk}")
+            yield Static(f"[bold]¿Cuándo usarla?[/bold]\n{when}")
+
+            yield Static("", classes="sep")
+            yield Static("[bold]Estructura (patas)[/bold]")
+            for leg in opp.legs:
+                side_tag = "[green]COMPRA[/green]" if leg.side == "COMPRA" else "[red]VENTA[/red]"
+                bid_str = f"bid=${leg.bid}" if leg.bid is not None else ""
+                ask_str = f"ask=${leg.ask}" if leg.ask is not None else ""
+                price_str = f" | {bid_str} / {ask_str}" if bid_str or ask_str else ""
+                yield Static(
+                    f"  {side_tag} [bold]{leg.ticker}[/bold] "
+                    f"x[bold]{leg.qty}[/bold] "
+                    f"strike={leg.strike:.0f} {leg.right}"
+                    f"{price_str}"
+                )
+
+            yield Static("", classes="sep")
+            yield Static("[bold]KPIs[/bold]")
+            kpi_lines = self._kpi_lines()
+            for line in kpi_lines:
+                yield Static(f"  {line}")
+
+            yield Static("", classes="sep")
+            hint = self._action_hint()
+            yield Static(f"[bold]¿Qué hacer?[/bold]\n{hint}")
+
+            yield Static("", classes="sep")
+            yield Button("Cerrar", id="btn_close_detail", variant="primary")
+
+    CSS = """
+    DiscoveryDetailScreen {
+        align: center middle;
+        background: rgba(0, 0, 0, 0.7);
+    }
+    DiscoveryDetailScreen > Vertical {
+        width: 80;
+        max-height: 90%;
+        background: $surface;
+        border: thick $accent;
+        padding: 1 2;
+        overflow-y: auto;
+    }
+    DiscoveryDetailScreen #detail_title {
+        text-align: center;
+        text-style: bold;
+        padding-bottom: 1;
+    }
+    DiscoveryDetailScreen .sep {
+        height: 1;
+    }
+    DiscoveryDetailScreen Static {
+        margin-bottom: 0;
+    }
+    DiscoveryDetailScreen Button {
+        dock: bottom;
+        width: 20;
+        margin-top: 1;
+    }
+    """
+
+    def _safe(self, v: Any, default: float = 0) -> float:
+        if v is None:
+            return default
+        try:
+            f = float(v)
+            return default if math.isnan(f) else f
+        except (ValueError, TypeError):
+            return default
+
+    def _kpi_lines(self) -> list[str]:
+        m = self.opp.metrics
+        if self.opp.strategy == "mariposa":
+            return [
+                f"Débito neto:   ${self._safe(m.get('net_debit')):.0f} (riesgo máximo)",
+                f"Ganancia max:  ${self._safe(m.get('max_profit')):.0f}",
+                f"Gap entre alas: {self._safe(m.get('gap')):.0f} puntos",
+                f"Costo / width:  {self._safe(m.get('cost_pct_of_width')):.1f}%",
+                f"Delta K2:       {self._safe(m.get('k2_delta')):.2f}",
+                f"Prob éxito:     {self._safe(m.get('prob_success')):.0%}",
+            ]
+        if self.opp.strategy == "renta_ic":
+            return [
+                f"Crédito recibido:  ${self._safe(m.get('credit_received')):.0f}",
+                f"Pérdida máxima:    ${self._safe(m.get('max_loss')):.0f}",
+                f"Ancho calls:       {self._safe(m.get('call_width')):.0f}",
+                f"Ancho puts:        {self._safe(m.get('put_width')):.0f}",
+                f"Crédito / width:   {self._safe(m.get('credit_pct_of_width')):.1f}%",
+                f"Prob éxito:        {self._safe(m.get('prob_success')):.0%}",
+            ]
+        if self.opp.strategy == "calendar":
+            return [
+                f"Costo:          ${self._safe(m.get('cost')):.0f}",
+                f"DTE corto:      {m.get('short_dte', '?')} días",
+                f"DTE largo:      {m.get('long_dte', '?')} días",
+                f"Theta corto:    {self._safe(m.get('short_theta'))}",
+                f"Theta largo:    {self._safe(m.get('long_theta'))}",
+                f"Diferencia θ:   {self._safe(m.get('theta_diff'))}",
+            ]
+        if self.opp.strategy == "sintetico":
+            return [
+                f"Costo neto: ${self._safe(m.get('net_cost')):.0f}",
+                f"Strike:     {self._safe(m.get('strike')):.0f}",
+            ]
+        return [f"{k}: {v}" for k, v in m.items()]
+
+    def _action_hint(self) -> str:
+        if self.opp.strategy == "mariposa":
+            return (
+                "Si querés operarla, ejecutá las 3 patas en orden:\n"
+                "  arg-options place-order [K1_ticker] COMPRA 1 [ask_price]\n"
+                "  arg-options place-order [K2_ticker] VENTA 2 [bid_price]\n"
+                "  arg-options place-order [K3_ticker] COMPRA 1 [ask_price]\n"
+                "El débito total no debe superar el estimado."
+            )
+        if self.opp.strategy == "renta_ic":
+            return (
+                "Ejecutá las 4 patas:\n"
+                "  VENDER Call (strike alto)\n"
+                "  COMPRAR Call (strike más alto, seguro)\n"
+                "  VENDER Put (strike bajo)\n"
+                "  COMPRAR Put (strike más bajo, seguro)\n"
+                "El crédito neto es tu ingreso inicial."
+            )
+        if self.opp.strategy == "calendar":
+            return (
+                "VENDER la opción de corto plazo.\n"
+                "COMPRAR la opción de largo plazo.\n"
+                "Monitoreá la diferencia de Theta."
+            )
+        if self.opp.strategy == "sintetico":
+            side = "Comprar Call + Vender Put" if self.opp.side == "compra" else "Vender Call + Comprar Put"
+            tickers = ", ".join(l.ticker for l in self.opp.legs)
+            return (
+                f"{side}\n"
+                f"Tickers: {tickers}\n"
+                "Usar cuando buscás exposición direccional con menos capital."
+            )
+        return "Revisá los tickers y decidí si operar."
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn_close_detail":
+            self.app.pop_screen()
+
+
+# ---------------------------------------------------------------------------
+# Main app
+# ---------------------------------------------------------------------------
 
 class ArgOptionsApp(App):
     """Formulario + tabla. Guardá cadena y screening en archivos; screen desde archivo o formulario."""
@@ -138,6 +356,7 @@ class ArgOptionsApp(App):
         Binding("c", "chain", "Chain"),
         Binding("s", "screen_file", "Screen"),
         Binding("f", "screen_form", "ScrForm"),
+        Binding("d", "discover", "Descubrir"),
         Binding("j", "journal", "Journal"),
         Binding("a", "alerts", "Alertas"),
         Binding("l", "login_test", "Login"),
@@ -150,6 +369,9 @@ class ArgOptionsApp(App):
         self._watch_interval_s = watch_interval_s
         self._watch_timer = None
         self._watch_on = bool(watch_interval_s and watch_interval_s > 0)
+        self._discovery_opps: list[dscmod.Opportunity] = []
+        self._discovery_mode = False
+        self._discovery_cursor_idx: int | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -204,14 +426,15 @@ class ArgOptionsApp(App):
 
             with Vertical(id="right_col"):
                 yield Static(_DISPLAY_TITLE, id="tbl_title")
-                yield DataTable(id="tbl", zebra_stripes=True)
+                yield DataTable(id="tbl", zebra_stripes=True, cursor_type="row")
                 yield Static("", id="screen_status")
+                yield Button("Ver detalle", id="btn_detail", variant="primary")
                 yield RichLog(id="log", highlight=True, markup=True, max_lines=120)
         yield Footer()
 
     def on_mount(self) -> None:
         self.query_one("#log", RichLog).write(
-            "[bold green]arg-options[/bold green] — [dim]c/s/f/s keys · w auto · ? ayuda · q salir[/dim]"
+            "[bold green]arg-options[/bold green] — [dim]c chain · s screen · f form · d discover · j journal · a alerts · w auto · ? ayuda · q salir[/dim]"
         )
         self._reload_form_from_disk()
         if self._watch_on and self._watch_interval_s:
@@ -240,6 +463,8 @@ class ArgOptionsApp(App):
             self.action_screen_file()
         elif bid == "btn_screen_form":
             self.action_screen_form()
+        elif bid == "btn_detail":
+            self._show_detail_for_cursor()
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "sel_quick":
@@ -254,6 +479,35 @@ class ArgOptionsApp(App):
             self.query_one("#in_root", Input).value = mapping.get(val, "")
 
     # Removed on_select_changed
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if not self._discovery_mode:
+            return
+        try:
+            self._discovery_cursor_idx = int(event.row_key.value)
+        except (ValueError, AttributeError):
+            self._discovery_cursor_idx = None
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if not self._discovery_mode:
+            self._log("[dim]selección ignorada (no en modo discovery)[/dim]")
+            return
+        self._log(f"[dim]fila seleccionada: {event.row_key.value}[/dim]")
+        self._show_detail_for_row(event.row_key.value)
+
+    def _show_detail_for_cursor(self) -> None:
+        if self._discovery_cursor_idx is not None and 0 <= self._discovery_cursor_idx < len(self._discovery_opps):
+            self.push_screen(DiscoveryDetailScreen(self._discovery_opps[self._discovery_cursor_idx]))
+        else:
+            self._log("[yellow]Seleccioná una fila primero (click o flechas)[/yellow]")
+
+    def _show_detail_for_row(self, row_key: object) -> None:
+        try:
+            idx = int(str(row_key))
+            if 0 <= idx < len(self._discovery_opps):
+                self.push_screen(DiscoveryDetailScreen(self._discovery_opps[idx]))
+        except (ValueError, IndexError):
+            pass
 
 
     def _reload_form_from_disk(self) -> None:
@@ -329,6 +583,7 @@ class ArgOptionsApp(App):
         self.query_one("#log", RichLog).write(msg)
 
     def _set_results_table(self, df: pd.DataFrame, title: str) -> None:
+        self._discovery_mode = False
         self.query_one("#tbl_title", Static).update(title)
         _populate_data_table(self.query_one("#tbl", DataTable), df)
 
@@ -337,7 +592,9 @@ class ArgOptionsApp(App):
             "[bold]Ayuda[/bold]\n"
             "• Guardá [bold]cadena[/bold] para persistir raíz+spot en settings YAML.\n"
             "• [bold]Screen (archivo)[/bold] usa el YAML guardado; [bold]Screen (form)[/bold] usa solo lo que ves (sin guardar).\n"
-            "• Teclas: c chain · s screen archivo · f screen form · w auto."
+            "• [bold]Discover[/bold] escanea todas las estrategias y guarda en DB.\n"
+            "• En resultados de discover, usá [bold]Ver detalle[/bold] o Enter para ver la explicación completa.\n"
+            "• Teclas: c chain · s screen · f form · d discover · j journal · a alerts · l login · w auto · ? ayuda · q salir."
         )
 
     def action_quit(self) -> None:
@@ -358,6 +615,9 @@ class ArgOptionsApp(App):
 
     def action_alerts(self) -> None:
         self.run_alerts_worker()
+
+    def action_discover(self) -> None:
+        self.run_discover_worker()
 
     def action_login_test(self) -> None:
         self.run_login_worker()
@@ -477,6 +737,89 @@ class ArgOptionsApp(App):
 
         self.call_from_thread(show)
 
+
+    @work(thread=True, exclusive=True, name="discover")
+    def run_discover_worker(self) -> None:
+        self._from_thread(lambda: self._log("[dim]descubriendo oportunidades…[/dim]"))
+        try:
+            s = load_settings()
+            engine = dscmod.DiscoveryEngine(s)
+            try:
+                opps = engine.run()
+            except Exception as inner:
+                self._from_thread(lambda err=inner: self._log(f"[red]engine.run:[/red] {err}"))
+                return
+
+            if not opps:
+                self.call_from_thread(lambda: self._log("[yellow]descubrimiento: sin oportunidades[/yellow]"))
+                return
+
+            def show() -> None:
+                try:
+                    self._log(f"[green]descubrimiento OK[/green] — {len(opps)} oportunidades")
+                    self._set_discovery_results(opps)
+                except Exception as e:
+                    self._log(f"[red]error mostrando discovery:[/red] {e}")
+
+            self.call_from_thread(show)
+        except Exception as e:
+            tb = traceback.format_exc()
+            self._from_thread(lambda err=e, tb=tb: self._log(f"[red]descubrimiento:[/red] {err}\n{tb}"))
+
+    @staticmethod
+    def _safe(v: Any, default: float = 0) -> float:
+        if v is None:
+            return default
+        try:
+            f = float(v)
+            return default if math.isnan(f) else f
+        except (ValueError, TypeError):
+            return default
+
+    def _discovery_summary(self, strategy: str, meta: dict) -> str:
+        if strategy == "mariposa":
+            return (
+                f"K={self._safe(meta.get('k2_delta')):.2f}D "
+                f"Debit=${self._safe(meta.get('net_debit')):.0f} "
+                f"MaxP=${self._safe(meta.get('max_profit')):.0f}"
+            )
+        if strategy == "renta_ic":
+            return (
+                f"Credit=${self._safe(meta.get('credit_received')):.0f} "
+                f"Width={self._safe(meta.get('call_width')):.0f}"
+            )
+        if strategy == "calendar":
+            return (
+                f"S-DTE={meta.get('short_dte', '?')} "
+                f"L-DTE={meta.get('long_dte', '?')} "
+                f"Costo=${self._safe(meta.get('cost')):.0f}"
+            )
+        if strategy == "sintetico":
+            return f"Costo=${self._safe(meta.get('net_cost')):.0f} K={self._safe(meta.get('strike')):.0f}"
+        return str(meta)
+
+    def _set_discovery_results(self, opps: list[dscmod.Opportunity]) -> None:
+        self._discovery_opps = opps
+        self._discovery_mode = True
+        table = self.query_one("#tbl", DataTable)
+        table.clear(columns=True)
+        table.add_column("Root", key="d_root", width=6)
+        table.add_column("Estrategia", key="d_strat", width=14)
+        table.add_column("Conf", key="d_conf", width=5)
+        table.add_column("Side", key="d_side", width=8)
+        table.add_column("Estructura", key="d_struct", width=48)
+        table.add_column("KPIs", key="d_kpis", width=40)
+
+        for i, opp in enumerate(sorted(opps, key=lambda o: o.confidence, reverse=True)):
+            label = dscmod.STRATEGY_LABELS.get(opp.strategy, opp.strategy)
+            side_label = dscmod.SIDE_LABELS.get(opp.side, opp.side)
+            tickers = ", ".join(f"{l.ticker}" for l in opp.legs)
+            summary = self._discovery_summary(opp.strategy, opp.metrics)
+            table.add_row(opp.root, label, f"{opp.confidence:.0f}", side_label, tickers, summary, key=str(i))
+
+        text = f"[bold]Discovery[/bold] · {len(opps)} oportunidades · click en fila para detalle"
+        self.query_one("#tbl_title", Static).update(text)
+        self._update_status(f"Discovery: {len(opps)} oportunidades", "green")
 
     @work(thread=True, exclusive=True, name="journal")
     def run_journal_worker(self) -> None:

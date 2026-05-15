@@ -18,6 +18,7 @@ paths:
   database: "data/arg_options.db"
   snapshot_export_parquet: "data/last_chain.parquet"
   screening: "config/screening.yaml"
+  discovery_rules: "config/discovery_rules.yaml"
 
 chain:
   option_roots:

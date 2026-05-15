@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -76,6 +77,23 @@ def init_schema(conn: sqlite3.Connection) -> None:
             day TEXT PRIMARY KEY,
             notional_ars REAL NOT NULL DEFAULT 0
         );
+
+        CREATE TABLE IF NOT EXISTS discovery_opportunities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            root TEXT NOT NULL,
+            strategy TEXT NOT NULL,
+            side TEXT,
+            expiry TEXT,
+            structure_json TEXT NOT NULL,
+            metrics_json TEXT NOT NULL,
+            confidence_score REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending'
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_disc_ts ON discovery_opportunities(ts);
+        CREATE INDEX IF NOT EXISTS idx_disc_root ON discovery_opportunities(root);
+        CREATE INDEX IF NOT EXISTS idx_disc_strategy ON discovery_opportunities(strategy);
         """
     )
     conn.commit()
@@ -160,6 +178,91 @@ def add_daily_notional(conn: sqlite3.Connection, add_ars: float, day: date | Non
         """,
         (d, add_ars),
     )
+    conn.commit()
+
+
+class _SafeEncoder(json.JSONEncoder):
+    def default(self, o: Any) -> str:
+        return str(o)
+
+    def encode(self, o: Any) -> str:
+        return super().encode(_clean_nan(o))
+
+
+def _clean_nan(o: Any) -> Any:
+    if isinstance(o, float):
+        return None if math.isnan(o) or math.isinf(o) else o
+    if isinstance(o, dict):
+        return {k: _clean_nan(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_clean_nan(v) for v in o]
+    return o
+
+
+def insert_discovery_opportunity(
+    conn: sqlite3.Connection,
+    root: str,
+    strategy: str,
+    side: str | None,
+    expiry: str | None,
+    structure: list[dict[str, Any]],
+    metrics: dict[str, float],
+    confidence: float,
+    ts: str | None = None,
+    status: str = "pending",
+) -> int:
+    _ts = ts or utc_now_iso()
+    cur = conn.execute(
+        """
+        INSERT INTO discovery_opportunities
+            (ts, root, strategy, side, expiry, structure_json, metrics_json, confidence_score, status)
+        VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            _ts,
+            root,
+            strategy,
+            side,
+            expiry,
+            json.dumps(structure, cls=_SafeEncoder),
+            json.dumps(metrics, cls=_SafeEncoder),
+            confidence,
+            status,
+        ),
+    )
+    conn.commit()
+    return cur.lastrowid or 0
+
+
+def load_latest_discovery(
+    conn: sqlite3.Connection,
+    root: str | None = None,
+    strategy: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    wheres: list[str] = []
+    params: list[Any] = []
+    if root:
+        wheres.append("root = ?")
+        params.append(root)
+    if strategy:
+        wheres.append("strategy = ?")
+        params.append(strategy)
+    where_clause = " AND ".join(wheres) if wheres else "1"
+    sql = f"""
+        SELECT * FROM discovery_opportunities
+        WHERE {where_clause}
+        ORDER BY ts DESC, confidence_score DESC
+        LIMIT ?
+    """
+    params.append(limit)
+    cur = conn.execute(sql, params)
+    rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_discovery_status(conn: sqlite3.Connection, opp_id: int, status: str) -> None:
+    conn.execute("UPDATE discovery_opportunities SET status = ? WHERE id = ?", (status, opp_id))
     conn.commit()
 
 
