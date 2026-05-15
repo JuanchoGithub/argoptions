@@ -2,7 +2,7 @@
 set -e
 
 # Install dependencies
-pip install -e \.\[dev\]
+pip3 install -e \.\[dev\]
 
 # Run tests
 pytest
