@@ -11,7 +11,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
-from textual.widgets import Button, DataTable, Footer, Header, Input, RichLog, Static
+from textual.widgets import Button, DataTable, Footer, Header, Input, RichLog, Static, Select
 
 from arg_options import chain as chainmod
 from arg_options import journal as journalmod
@@ -81,15 +81,36 @@ class ArgOptionsApp(App):
         height: 100%;
     }
     #right_col { width: 1fr; border: solid $accent; padding: 0 1; }
-    #tbl { height: 58%; min-height: 10; }
+    #tbl { height: 50%; min-height: 10; }
     #log { height: 1fr; min-height: 6; border: tall $border-blurred; }
     #tbl_title { padding: 0 0 1 0; }
+    #screen_status {
+        height: 4;
+        margin-bottom: 1;
+        padding: 0 1;
+        background: $surface;
+        color: $text;
+        border: solid $border;
+        overflow-y: scroll;
+    }
     /* Los Input en Horizontal se quedaban con ancho 0; acá ocupan todo el panel */
     #left_scroll Input {
-        width: 100%;
+        width: 1fr;
         height: auto;
         min-height: 3;
         margin: 0 0 1 0;
+    }
+    #spot_row {
+        height: auto;
+        margin-bottom: 1;
+    }
+    #sel_quick {
+        width: 20;
+        margin-left: 1;
+    }
+    #dte_row, #vol_spread_row, #delta_row, #alert_row {
+        height: auto;
+        margin-bottom: 1;
     }
     #left_scroll .field-label {
         height: auto;
@@ -110,6 +131,7 @@ class ArgOptionsApp(App):
     }
     Button { margin-right: 1; margin-bottom: 1; }
     """
+
 
     BINDINGS = [
         Binding("q", "quit", "Salir"),
@@ -137,10 +159,20 @@ class ArgOptionsApp(App):
                     "[bold]Cadena (acción)[/bold] — raíz BYMA + spot en PPI",
                     classes="section-title",
                 )
+                yield Static("Spot (Ticker)", classes="field-label")
+                with Horizontal(id="spot_row"):
+                    yield Input(placeholder="GGAL", id="in_spot")
+                    yield Select(
+                        options=[
+                            ("GGAL", "GGAL"),
+                            ("YPF", "YPF"),
+                            ("PAMP", "PAMP"),
+                            ("BMA", "BMA"),
+                        ],
+                        id="sel_quick",
+                    )
                 yield Static("Raíz (prefijo opción, ej. GFG)", classes="field-label")
                 yield Input(placeholder="GFG", id="in_root")
-                yield Static("Spot (ticker acción en PPI, ej. GGAL)", classes="field-label")
-                yield Input(placeholder="GGAL", id="in_spot")
                 with Horizontal(classes="btn-row"):
                     yield Button("Validar con PPI", id="btn_validate", variant="primary")
                     yield Button("Guardar cadena", id="btn_save_chain")
@@ -149,29 +181,31 @@ class ArgOptionsApp(App):
                     "[bold]Screening[/bold] — se guarda en screening.yaml (ver paths.screening)",
                     classes="section-title",
                 )
-                yield Static("min DTE (días al vencimiento mínimo)", classes="field-label")
-                yield Input(id="in_min_dte")
-                yield Static("max DTE", classes="field-label")
-                yield Input(id="in_max_dte")
-                yield Static("min volumen (proxy)", classes="field-label")
-                yield Input(id="in_min_vol")
-                yield Static("max spread % sobre mid", classes="field-label")
-                yield Input(id="in_max_spread")
-                yield Static("min |delta| (0 = no filtrar)", classes="field-label")
-                yield Input(id="in_min_delta")
-                yield Static("max |delta|", classes="field-label")
-                yield Input(id="in_max_delta")
-                yield Static("alert interval (segundos entre alertas)", classes="field-label")
-                yield Input(id="in_alert_int")
-                yield Static("alert vencimiento cercano (días)", classes="field-label")
-                yield Input(id="in_near_exp")
+                yield Static("DTE (días al vencimiento)", classes="field-label")
+                with Horizontal(id="dte_row"):
+                    yield Input(placeholder="min", id="in_min_dte")
+                    yield Input(placeholder="max", id="in_max_dte")
+                yield Static("Volumen / Spread %", classes="field-label")
+                with Horizontal(id="vol_spread_row"):
+                    yield Input(placeholder="min vol", id="in_min_vol")
+                    yield Input(placeholder="max spread", id="in_max_spread")
+                yield Static("Delta |Δ|", classes="field-label")
+                with Horizontal(id="delta_row"):
+                    yield Input(placeholder="min delta", id="in_min_delta")
+                    yield Input(placeholder="max delta", id="in_max_delta")
+                yield Static("Alertas (intervalo seg / vencimiento días)", classes="field-label")
+                with Horizontal(id="alert_row"):
+                    yield Input(placeholder="intervalo seg", id="in_alert_int")
+                    yield Input(placeholder="vencimiento días", id="in_near_exp")
                 with Horizontal(classes="btn-row"):
                     yield Button("Guardar screening", id="btn_save_screen", variant="success")
                     yield Button("Screen (archivo)", id="btn_screen_file")
                     yield Button("Screen (form)", id="btn_screen_form")
+
             with Vertical(id="right_col"):
                 yield Static(_DISPLAY_TITLE, id="tbl_title")
                 yield DataTable(id="tbl", zebra_stripes=True)
+                yield Static("", id="screen_status")
                 yield RichLog(id="log", highlight=True, markup=True, max_lines=120)
         yield Footer()
 
@@ -207,14 +241,29 @@ class ArgOptionsApp(App):
         elif bid == "btn_screen_form":
             self.action_screen_form()
 
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "sel_quick":
+            val = event.value
+            mapping = {
+                "GGAL": "GFG",
+                "YPF": "YPF",
+                "PAMP": "PMP",
+                "BMA": "BMA",
+            }
+            self.query_one("#in_spot", Input).value = val
+            self.query_one("#in_root", Input).value = mapping.get(val, "")
+
+    # Removed on_select_changed
+
+
     def _reload_form_from_disk(self) -> None:
         s = load_settings()
         roots = list(s.chain_config.get("option_roots") or [])
         root = roots[0] if roots else ""
         spot_map = s.underlying_spot
         spot = spot_map.get(root, next(iter(spot_map.values()), "") if spot_map else "")
-        self.query_one("#in_root", Input).value = root
         self.query_one("#in_spot", Input).value = spot
+        self.query_one("#in_root", Input).value = root
         rules = screenmod.load_screening_config(None, s)
         al = rules.get("alerts") or {}
 
@@ -398,6 +447,9 @@ class ArgOptionsApp(App):
         except Exception as e:
             self._from_thread(lambda err=e: self._log(f"[red]screen:[/red] {err}"))
 
+    def _update_status(self, msg: str, color: str = "white") -> None:
+        self.query_one("#screen_status", Static).update(f"[{color}]{msg}[/]")
+
     def _finish_screen_ui(self, df: pd.DataFrame, from_file: bool, rules_for_hint: dict[str, Any]) -> None:
         if df.empty:
             s = load_settings()
@@ -409,7 +461,8 @@ class ArgOptionsApp(App):
             )
 
             def empty() -> None:
-                self._log(f"[yellow]screen: 0 filas[/yellow]\n[dim]{hint}[/dim]")
+                self._log(f"[yellow]screen: 0 filas[/yellow]")
+                self._update_status(hint, "yellow")
                 self._set_results_table(pd.DataFrame(), "Screen (0 filas)")
 
             self.call_from_thread(empty)
@@ -419,9 +472,11 @@ class ArgOptionsApp(App):
 
         def show() -> None:
             self._log(f"[green]screen OK[/green] — {len(df)} filas ({src})")
+            self._update_status(f"Screen OK: {len(df)} filas encontradas.", "green")
             self._set_results_table(df, f"Screen ({src}) · {len(df)} filas")
 
         self.call_from_thread(show)
+
 
     @work(thread=True, exclusive=True, name="journal")
     def run_journal_worker(self) -> None:

@@ -7,25 +7,20 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
 
-# Códigos de mes usados en tickers BYMA (ej. MY = mayo). Ajustable si BYMA cambia convención.
+# Códigos de mes usados en tickers BYMA.
+# 1 letra (oficial BYMA) para strikes altos, 2 letras (PPI) para strikes bajos.
 MONTH_SUFFIX_TO_MONTH: dict[str, int] = {
-    "EN": 1,
-    "FE": 2,
-    "MR": 3,
-    "AB": 4,
-    "MY": 5,
-    "JN": 6,
-    "JL": 7,
-    "AG": 8,
-    "SE": 9,
-    "OC": 10,
-    "NV": 11,
-    "DI": 12,
+    "EN": 1,  "FE": 2,  "MA": 3,  "AB": 4,
+    "MY": 5,  "JU": 6,  "JL": 7,  "AG": 8,
+    "SE": 9,  "OC": 10, "NO": 11, "DI": 12,
+    "E": 1, "F": 2, "M": 3, "A": 4, "Y": 5,
+    "J": 6, "L": 7, "G": 8, "S": 9, "O": 10,
+    "N": 11, "D": 12,
 }
 
-# Patrón tipo GFGC2800MY o GGALV1500OC24 (sufijo mes + año opcional)
+# Patrón: GFGC2800MY, GFGC10200J, GGALV1500OC24 (1 o 2 letras para el mes + año opcional)
 _TICKER_RE = re.compile(
-    r"^([A-Z0-9]+)(C|V)(\d+)([A-Z]{2})(\d{2})?$",
+    r"^([A-Z0-9]+)(C|V)(\d+)([A-Z]{1,2})(\d{2})?$",
     re.IGNORECASE,
 )
 
@@ -66,7 +61,7 @@ def parse_byma_option_ticker(ticker: str, reference_year: int | None = None) -> 
         # el caller puede pasar reference_year explícito.
         pass
     strike = float(strike_s)
-    right = cv.upper()
+    right = "P" if cv.upper() == "V" else "C"
     exp = third_thursday(year, month)
     return ParsedOption(
         option_root=root,
