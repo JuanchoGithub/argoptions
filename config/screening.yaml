@@ -1,0 +1,15 @@
+# Filtros de pantalla (opcional: borrá una clave para no aplicar ese filtro)
+# Si min_days_to_expiry es alto y el vencimiento está cerca, el screen puede quedar vacío.
+
+min_days_to_expiry: 0
+max_days_to_expiry: 45
+min_open_interest_proxy_volume: 0
+max_bid_ask_spread_pct_mid: 35
+# Griegos a veces vienen vacíos (sandbox / sin mid); 0 = no filtrar por delta
+min_abs_delta: 0
+max_abs_delta: 0.99
+min_underlying_vs_strike_pct_otm_call: 0
+
+alerts:
+  min_interval_seconds: 3600
+  near_expiry_days: 7

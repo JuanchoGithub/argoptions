@@ -1,5 +1,24 @@
-# argoptions
-Opciones Argentinas terminal interactiva gracias Dr. Mancusso
+Metadata-Version: 2.4
+Name: arg-options
+Version: 0.1.0
+Summary: Opciones BYMA via PPI: cadena, Greeks, screening, diario, alertas, órdenes
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: ppi-client>=1.2.4
+Requires-Dist: python-dotenv>=1.0.0
+Requires-Dist: PyYAML>=6.0
+Requires-Dist: pandas>=2.0.0
+Requires-Dist: numpy>=1.24.0
+Requires-Dist: scipy>=1.10.0
+Requires-Dist: requests>=2.28.0
+Requires-Dist: typer>=0.12.0
+Requires-Dist: rich>=13.0.0
+Requires-Dist: textual>=0.80.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4.0; extra == "dev"
+Requires-Dist: pyarrow>=14.0.0; extra == "dev"
+
+# arg_options
 
 Herramientas para cadena de opciones BYMA usando la API oficial de PPI (Python `ppi-client`): snapshots en SQLite, Greeks locales, screening, diario, alertas y órdenes con **dry-run** por defecto.
 
@@ -53,21 +72,17 @@ La salida de `screen` usa tablas con colores (Rich); para CSV sin decorar usá `
 
 ## App interactiva (sin cron)
 
-La TUI **se queda abierta**: panel izquierdo para **cadena** (raíz + spot), **validar con PPI**, **guardar** en `settings.yaml`; **screening** con campos editables y **guardar** en `screening.yaml` (o la ruta en `paths.screening`). A la derecha: **tabla** con el último chain o screen y **log**.
-
-- **Screen (archivo)** (`s`): aplica reglas leídas del YAML guardado.
-- **Screen (form)** (`f`): aplica lo que ves en el formulario **sin** guardar (para probar antes de persistir).
+La terminal **se queda abierta**; usás teclas en lugar de disparar comandos sueltos cada vez. Sirve para refrescar la cadena a mano o en **auto** cada N segundos.
 
 ```bash
 arg-options interactive              # manual; w activa auto cada 300s
-arg-options interactive --watch 300  # auto chain cada 300s
+arg-options interactive --watch 300  # auto chain cada 300s (y primera corrida ~1s)
+python3 -m arg_options interactive -w 180
 ```
 
-**Teclas:** `c` chain · `s` screen archivo · `f` screen formulario · `j` journal · `a` alerts · `l` login · `w` auto · `?` ayuda · `q` salir.
+**Teclas:** `c` chain · `s` screen · `j` journal-sync · `a` alerts · `l` login-test · `w` pausa/reanuda auto-chain · `?` ayuda · `q` salir.
 
-Variable opcional: `ARG_OPTIONS_SCREENING` apunta a otro YAML de screening.
-
-Dependencia: **Textual**.
+Dependencia: **Textual** (se instala con el paquete).
 
 ## Tests
 

@@ -1,0 +1,27 @@
+# Copiar a config/settings.yaml. Ejemplo solo Galicia (GFG → GGAL).
+
+ppi:
+  market: "Byma"          # según doc PPI (también probá "BYMA")
+  instrument_type_options: "OPCIONES"
+  instrument_type_equity: "ACCIONES"
+  default_settlement: "A-48HS"
+
+# Mapeo ticker de opción (prefijo BYMA, ej. GFG) -> ticker spot para precio subyacente
+underlying_spot:
+  GFG: "GGAL"
+
+# Tasa anual continua aproximada para IV/Greeks (ajustar según tu criterio)
+risk_free_rate: 0.45
+
+# Multiplicador contrato acciones Argentina (típico 100 nominales)
+contract_multiplier: 100
+
+paths:
+  database: "data/arg_options.db"
+  snapshot_export_parquet: "data/last_chain.parquet"
+  screening: "config/screening.yaml"  # usado por CLI/TUI y ARG_OPTIONS_SCREENING opcional
+
+chain:
+  # Prefijos de ticker de opciones a incluir en la cadena (uno por subyacente listado)
+  option_roots:
+    - GFG
