@@ -562,7 +562,7 @@ class ArgOptionsApp(App[None]):
         else:
             self._start_watch()
 
-    async def action_toggle_env(self) -> None:
+    def action_toggle_env(self) -> None:
         if self._mode == "production":
             self._mode = "test"
             indicator = self.query_one("#mode-indicator", Static)
@@ -571,17 +571,19 @@ class ArgOptionsApp(App[None]):
             self._log("Switched to [yellow]TEST[/yellow] mode")
             self._status("TEST mode")
         else:
-            screen = EnvSwitchScreen()
-            result = await self.push_screen_wait(screen)
-            if result:
-                self._mode = "production"
-                indicator = self.query_one("#mode-indicator", Static)
-                indicator.classes = "production"
-                indicator.update(self._mode_label())
-                self._log("Switched to [red]PRODUCTION[/red] mode — LIVE TRADING")
-                self._status("PRODUCTION mode — LIVE TRADING")
-            else:
-                self._log("Production switch cancelled")
+
+            def _on_dismiss(result: bool) -> None:
+                if result:
+                    self._mode = "production"
+                    indicator = self.query_one("#mode-indicator", Static)
+                    indicator.classes = "production"
+                    indicator.update(self._mode_label())
+                    self._log("Switched to [red]PRODUCTION[/red] mode — LIVE TRADING")
+                    self._status("PRODUCTION mode — LIVE TRADING")
+                else:
+                    self._log("Production switch cancelled")
+
+            self.app.push_screen(EnvSwitchScreen(), _on_dismiss)
 
     def action_show_logs(self) -> None:
         self.push_screen(LogViewerScreen())
@@ -727,7 +729,10 @@ class ArgOptionsApp(App[None]):
             self.call_from_thread(self._log, f"[green]{msg}[/green]")
             self.call_from_thread(self._append_result, "Screen", msg)
             if df.empty:
-                reason = explain_why_screen_empty(config)
+                from arg_options.core.screen import get_latest_snapshot_rows
+                latest_rows = get_latest_snapshot_rows(config)
+                rules = load_screening_config(settings=config)
+                reason = explain_why_screen_empty(latest_rows, rules)
                 self.call_from_thread(self._log, f"[yellow]Empty:[/yellow] {reason}")
                 self.call_from_thread(self._status, f"Screen empty: {reason}")
             else:
@@ -760,7 +765,7 @@ class ArgOptionsApp(App[None]):
             self.call_from_thread(self._log, "Running discovery...")
             config = load_settings(self._mode)
             engine = DiscoveryEngine(config)
-            opps = engine.discover()
+            opps = engine.run()
             self._discovery_opps = opps
             msg = f"Discovery: {len(opps)} opportunities"
             self.call_from_thread(self._log, f"[green]{msg}[/green]")
