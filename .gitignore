@@ -18,6 +18,7 @@ build/
 .vscode/
 *.iml
 .env
+.env*
 .venv/
 *.db
 PKG-INFO
@@ -25,3 +26,4 @@ MANIFEST
 SOURCES.txt
 
 uv.lock
+data/
