@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Show available run scripts and what each does.
+source "$(cd "$(dirname "$0")" && pwd)/_bootstrap.sh" 2>/dev/null || true
+
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║              argoptions — run scripts                   ║"
+echo "╚══════════════════════════════════════════════════════════╝"
+echo ""
+
+printf "  %-28s  %s\n" "SCRIPT" "PURPOSE"
+printf "  %-28s  %s\n" "------" "-------"
+echo ""
+
+printf "  %-28s  %s\n" "./run.sh" "Launch TUI in TEST (sandbox) — default, always safe"
+printf "  %-28s  %s\n" "./run_prod.sh" "Launch TUI in PRODUCTION — ⚠️  real money"
+echo ""
+printf "  %-28s  %s\n" "./run_engine.sh" "Run automation engine (continuous loop)"
+printf "  %-28s  %s\n" "./run_engine.sh --once" "Run one engine cycle, then exit"
+printf "  %-28s  %s\n" "./run_engine.sh --prod" "Engine in production mode"
+echo ""
+printf "  %-28s  %s\n" "./run_chain.sh" "Build option chain (one-shot)"
+printf "  %-28s  %s\n" "./run_screen.sh" "Run screening filters (one-shot)"
+printf "  %-28s  %s\n" "./run_status.sh" "Show account balances & positions"
+printf "  %-28s  %s\n" "./run_orders.sh" "Show active orders"
+printf "  %-28s  %s\n" "./run_journal.sh" "Sync journal & show P&L"
+echo ""
+printf "  %-28s  %s\n" "./run_test.sh" "Run the full test suite"
+printf "  %-28s  %s\n" "./run_cron.sh" "Cron entry point — logs to data/logs/"
+printf "  %-28s  %s\n" "./setup.sh" "Explicit setup (automatic otherwise)"
+echo ""
+echo "──────────────────────────────────────────────────────────"
+echo "All scripts are self-bootstrapping: just run them."
+echo "No manual setup needed. Every script auto-creates the"
+echo "venv, installs deps, and copies example configs."
+echo ""
+echo "Production mode always shows a 🔴 warning + 2s delay."
+echo "TUI key: t toggles test/prod (with confirmation dialog)."
