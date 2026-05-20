@@ -43,9 +43,11 @@ class DiscoveryEngine:
         self._broker = create_broker(settings)
 
     def run(self) -> list[Opportunity]:
+        logger.info("=== DISCOVERY STARTED ===")
         self._broker.connect()
         try:
             rows = build_full_chain(self._broker, self._settings)
+            logger.info(f"Chain built with {len(rows)} rows")
         finally:
             try:
                 self._broker.disconnect()
@@ -57,7 +59,10 @@ class DiscoveryEngine:
             return []
 
         df = pd.DataFrame(rows)
+        logger.info(f"DataFrame created with {len(df)} rows")
+        
         df = self._apply_screening(df)
+        logger.info(f"After screening: {len(df)} rows")
 
         if df.empty:
             logger.info("Chain empty after screening")
@@ -74,19 +79,23 @@ class DiscoveryEngine:
         ):
             try:
                 found = finder(df)
+                logger.info(f"{finder.__name__} found {len(found)} opportunities")
                 opportunities.extend(found)
             except Exception as e:
                 logger.warning("Strategy %s failed: %s", finder.__name__, e)
 
         opportunities.sort(key=lambda o: o.confidence, reverse=True)
-        logger.info("Discovery found %d opportunities", len(opportunities))
+        logger.info("Discovery found %d opportunities total", len(opportunities))
         return opportunities
 
     def _apply_screening(self, df: pd.DataFrame) -> pd.DataFrame:
+        logger.info(f"Applying screening to {len(df)} rows")
         dte_min = self._rules.get("dte_min", 0)
         dte_max = self._rules.get("dte_max", 9999)
         volume_min = self._rules.get("volume_min", 0)
         max_spread = self._rules.get("max_spread_pct", 1.0)
+        
+        logger.info(f"Screening rules: DTE {dte_min}-{dte_max}, Volume >= {volume_min}, Spread <= {max_spread}")
 
         mask = (
             (df["dte"] >= dte_min)
@@ -94,7 +103,9 @@ class DiscoveryEngine:
             & (df["volume"] >= volume_min)
             & (df["spread_pct"] <= max_spread)
         )
-        return df[mask].copy()
+        screened = df[mask].copy()
+        logger.info(f"Screening filtered {len(df) - len(screened)} rows, {len(screened)} remaining")
+        return screened
 
     def _find_mariposa(self, df: pd.DataFrame) -> list[Opportunity]:
         opportunities: list[Opportunity] = []

@@ -44,15 +44,17 @@ def chain(
 @app.command()
 def screen(
     prod: bool = typer.Option(False, "--prod"),
+    stored: bool = typer.Option(False, "--stored", help="Use latest stored chain data instead of live API"),
 ) -> None:
     """Run screening with saved config."""
-    from arg_options.config.settings import load_settings
-    from arg_options.core.screen import run_screen
-
+    from arg_options.services.screening_service import ScreeningService
+    
     mode = "production" if prod else "test"
-    config = load_settings(mode)
-    df = run_screen(config)
-    print(f"Screen results: {len(df)} rows")
+    service = ScreeningService(mode=mode, use_stored=stored)
+    df = service.run_screening()
+    stats = service.get_screening_stats(df)
+    
+    print(f"Screen results: {stats['total_rows']} rows")
     if not df.empty:
         print(df.to_string())
 
@@ -101,19 +103,83 @@ def orders(
 
 
 @app.command()
+def chain(
+    prod: bool = typer.Option(False, "--prod"),
+) -> None:
+    """Build option chain and save to parquet."""
+    from arg_options.services.chain_service import ChainService
+    
+    mode = "production" if prod else "test"
+    service = ChainService(mode=mode)
+    count, ts = service.build_and_save_chain()
+    print(f"Chain saved: {count} rows at {ts}")
+
+
+@app.command()
+def screen(
+    prod: bool = typer.Option(False, "--prod"),
+    stored: bool = typer.Option(False, "--stored", help="Use latest stored chain data instead of live API"),
+) -> None:
+    """Run screening with saved config."""
+    from arg_options.services.screening_service import ScreeningService
+    
+    mode = "production" if prod else "test"
+    service = ScreeningService(mode=mode, use_stored=stored)
+    df = service.run_screening()
+    stats = service.get_screening_stats(df)
+    
+    print(f"Screen results: {stats['total_rows']} rows")
+    if not df.empty:
+        print(df.to_string())
+
+
+@app.command()
+def status(
+    prod: bool = typer.Option(False, "--prod"),
+) -> None:
+    """Show account status, positions, balances."""
+    from arg_options.services.account_service import AccountService
+    
+    mode = "production" if prod else "test"
+    service = AccountService(mode=mode)
+    results = service.get_account_status()
+    for res in results:
+        acc = res["account"]
+        print(f"Account: {acc.account_number} - {acc.name}")
+        for balance in res["balances"]:
+            print(f"  {balance.name}: {balance.symbol} {balance.amount} ({balance.settlement})")
+
+
+@app.command()
+def orders(
+    prod: bool = typer.Option(False, "--prod"),
+) -> None:
+    """Show active orders."""
+    from arg_options.services.account_service import AccountService
+    
+    mode = "production" if prod else "test"
+    service = AccountService(mode=mode)
+    active = service.get_active_orders()
+    if not active:
+        print("No active orders")
+        return
+    for o in active:
+        print(
+            f"#{o.id} {o.ticker} {o.operation} qty={o.quantity} "
+            f"price={o.price} status={o.status}"
+        )
+
+
+@app.command()
 def journal(
     prod: bool = typer.Option(False, "--prod"),
 ) -> None:
     """Sync and show journal / P&L."""
-    from arg_options.config.settings import load_settings
-    from arg_options.broker import create_broker
-    from arg_options.core.journal import sync_journal
-
+    from arg_options.services.journal_service import JournalService
+    
     mode = "production" if prod else "test"
-    config = load_settings(mode)
-    broker = create_broker(config)
-    broker.connect()
-    summary = sync_journal(broker, config)
+    service = JournalService(mode=mode)
+    summary = service.sync_and_summarize()
     print(summary)
 
 
@@ -126,19 +192,12 @@ def cancel(
     prod: bool = typer.Option(False, "--prod"),
 ) -> None:
     """Cancel an order or all orders."""
-    from arg_options.config.settings import load_settings
-    from arg_options.broker import create_broker
-
+    from arg_options.services.account_service import AccountService
+    
     mode = "production" if prod else "test"
-    config = load_settings(mode)
-    broker = create_broker(config)
-    broker.connect()
-    if all or order_id is None:
-        result = broker.orders.mass_cancel(config.account_number)
-        print(f"Mass cancel: {result}")
-    else:
-        result = broker.orders.cancel_order(config.account_number, order_id)
-        print(f"Order #{order_id} cancelled: {result.status}")
+    service = AccountService(mode=mode)
+    result = service.cancel_orders(order_id=order_id, all_orders=all)
+    print(result)
 
 
 @app.command()

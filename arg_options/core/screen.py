@@ -45,32 +45,59 @@ def load_screening_config(
 
     screening = data.get("screening", data)
     rules = dict(DEFAULT_RULES)
-    rules.update({k: v for k, v in screening.items() if k in DEFAULT_RULES})
+    
+    # Log recognized vs unrecognized parameters
+    recognized_params = {k: v for k, v in screening.items() if k in DEFAULT_RULES}
+    unrecognized_params = set(screening.keys()) - set(DEFAULT_RULES.keys())
+    
+    if recognized_params:
+        logger.info("Applying recognized screening parameters: %s", recognized_params)
+    
+    if unrecognized_params:
+        logger.warning("Ignoring unrecognized screening parameters: %s", ", ".join(unrecognized_params))
+    
+    rules.update(recognized_params)
     return rules
 
 
 def run_screen(
     settings: BrokerConfig,
     rules_override: dict | None = None,
+    use_stored: bool = False,
 ) -> pd.DataFrame:
+    logger.info("=== SCREENING STARTED ===")
+    logger.info("Mode: %s", "stored data" if use_stored else "live API")
     config = settings
     rules = load_screening_config(settings=config)
     if rules_override:
         rules.update(rules_override)
+    
+    logger.info("Screening rules: %s", rules)
 
-    broker = create_broker(config)
-    broker.connect()
-
-    try:
-        rows = build_full_chain(broker, config)
-    finally:
+    if use_stored:
+        # Use latest stored chain data
+        rows = get_latest_chain(settings)
+        logger.info("Loaded %d options from stored chain data", len(rows))
+        if not rows:
+            logger.warning("No stored chain data found")
+            return pd.DataFrame()
+    else:
+        # Fetch live data from API
+        broker = create_broker(config)
+        logger.info("Broker created, connecting...")
         try:
-            broker.disconnect()
-        except Exception:
-            pass
+            broker.connect()
+            logger.info("Broker connected successfully")
+            rows = build_full_chain(broker, config)
+            logger.info("Chain building completed: %d options retrieved", len(rows))
+        finally:
+            try:
+                broker.disconnect()
+            except Exception:
+                pass
 
     if not rows:
-        logger.info("Chain is empty, no screening possible")
+        logger.info("No options available for screening")
         return pd.DataFrame()
 
     df = pd.DataFrame(rows)
@@ -81,6 +108,14 @@ def run_screen(
     max_spread_pct = rules.get("max_spread_pct", 1.0)
     delta_min = rules.get("delta_min", -1.0)
     delta_max = rules.get("delta_max", 1.0)
+
+    logger.info("Screening %d source options with rules: DTE(%d-%d), Volume(>=%d), Spread(<=%.1f%%), Delta(%.1f-%.1f)", 
+                len(df), dte_min, dte_max, volume_min, max_spread_pct*100, delta_min, delta_max)
+
+    # Quick debug check
+    logger.info("Sample delta values: %.3f to %.3f" % (df['delta'].min(), df['delta'].max()))
+    logger.info("Sample volume values: %.0f to %.0f" % (df['volume'].min(), df['volume'].max()))
+    logger.info("Sample spread values: %.6f to %.6f" % (df['spread_pct'].min(), df['spread_pct'].max()))
 
     mask = (
         (df["dte"] >= dte_min)

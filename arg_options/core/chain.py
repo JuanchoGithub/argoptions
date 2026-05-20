@@ -49,6 +49,7 @@ def build_full_chain(
     config: BrokerConfig,
 ) -> list[dict]:
     roots = _get_option_roots(config)
+    logger.info(f"Option roots from config: {roots}")
     if not roots:
         logger.warning("No option_roots configured in settings.yaml chain")
         return []
@@ -59,8 +60,17 @@ def build_full_chain(
     for root in roots:
         logger.info("Building chain for root: %s", root)
         instruments = search_instruments(broker, root)
+        logger.info("Found %d instruments for root %s", len(instruments), root)
         if not instruments:
             logger.warning("No instruments found for root: %s", root)
+            continue
+
+        underlying = _root_to_underlying(root)
+        logger.info(f"Underlying for {root}: {underlying}")
+        spot = get_spot_price(broker, underlying)
+        logger.info(f"Spot price for {underlying}: {spot}")
+        if spot is None:
+            logger.warning("Could not resolve spot price for %s", underlying)
             continue
 
         underlying = _root_to_underlying(root)
@@ -70,17 +80,22 @@ def build_full_chain(
             continue
 
         for instr in instruments:
+            logger.info(f"Processing instrument: {instr.ticker}")
             parsed = parse_ticker_parts(instr.ticker)
             if parsed is None:
+                logger.warning(f"Could not parse ticker: {instr.ticker}")
                 continue
 
             opt_root, raw_strike, right, expiry_yyyymmdd = parsed
+            logger.info(f"Parsed: root={opt_root}, strike={raw_strike}, right={right}, expiry={expiry_yyyymmdd}")
 
             try:
                 expiry = datetime.strptime(expiry_yyyymmdd, "%Y%m%d").date()
                 dte = max((expiry - today).days, 0)
                 T = max(dte / 365.0, 1e-6)
-            except (ValueError, OverflowError):
+                logger.info(f"Expiry: {expiry}, DTE: {dte}, T: {T}")
+            except (ValueError, OverflowError) as e:
+                logger.warning(f"Invalid expiry date {expiry_yyyymmdd}: {e}")
                 continue
 
             book = None

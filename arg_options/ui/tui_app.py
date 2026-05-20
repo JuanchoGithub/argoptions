@@ -24,8 +24,6 @@ from textual.widgets import (
     Static,
 )
 
-from arg_options.broker import create_broker
-from arg_options.broker.interfaces import BrokerConfig
 from arg_options.config.config_persist import (
     load_yaml,
     resolve_project_root,
@@ -34,7 +32,10 @@ from arg_options.config.config_persist import (
     save_chain_profile,
     save_screening_file,
 )
-from arg_options.config.settings import load_settings
+from arg_options.services.account_service import AccountService
+from arg_options.services.chain_service import ChainService
+from arg_options.services.journal_service import JournalService
+from arg_options.services.screening_service import ScreeningService
 from arg_options.db import (
     get_positions,
     get_orders,
@@ -654,8 +655,9 @@ class ArgOptionsApp(App[None]):
 
     def _check_live_allowed(self) -> bool:
         if self._mode == "production":
-            cfg = load_settings("production")
-            if not cfg.allow_live_orders:
+            service = AccountService(mode="production")
+            config = service.config
+            if not config.allow_live_orders:
                 self._log("[red]ERROR:[/red] allow_live_orders is FALSE. Set ALLOW_LIVE_ORDERS=true in .env_prod")
                 self._status("LIVE ORDERS NOT ALLOWED — check .env_prod")
                 return False
@@ -668,11 +670,10 @@ class ArgOptionsApp(App[None]):
         try:
             self.call_from_thread(self._status, "Building chain...")
             self.call_from_thread(self._log, "Building option chain...")
-            config = load_settings(self._mode)
-            broker = create_broker(config)
-            broker.connect()
-            rows = build_full_chain(broker, config)
-            count, ts = persist_chain(rows, config)
+            
+            # Use shared chain service
+            service = ChainService(mode=self._mode)
+            count, ts = service.build_and_save_chain()
             msg = f"Chain saved: {count} rows at {ts}"
             self.call_from_thread(self._log, f"[green]{msg}[/green]")
             self.call_from_thread(self._append_result, "Chain", msg)
@@ -716,23 +717,24 @@ class ArgOptionsApp(App[None]):
         from arg_options.core.screen import (
             explain_why_screen_empty,
             load_screening_config,
-            run_screen,
         )
 
         try:
             self.call_from_thread(self._status, "Running screen...")
             self.call_from_thread(self._log, f"Running screen (source={source})...")
-            config = load_settings(self._mode)
-            df = run_screen(config)
-            count = len(df)
+            
+            # Use shared screening service
+            service = ScreeningService(mode=self._mode, use_stored=True)
+            df = service.run_screening()
+            stats = service.get_screening_stats(df)
+            
+            count = stats["total_rows"]
             msg = f"Screen results: {count} rows"
             self.call_from_thread(self._log, f"[green]{msg}[/green]")
             self.call_from_thread(self._append_result, "Screen", msg)
             if df.empty:
-                from arg_options.core.screen import get_latest_snapshot_rows
-                latest_rows = get_latest_snapshot_rows(config)
-                rules = load_screening_config(settings=config)
-                reason = explain_why_screen_empty(latest_rows, rules)
+                rules = load_screening_config(settings=service.config)
+                reason = explain_why_screen_empty([], rules)
                 self.call_from_thread(self._log, f"[yellow]Empty:[/yellow] {reason}")
                 self.call_from_thread(self._status, f"Screen empty: {reason}")
             else:
@@ -759,12 +761,18 @@ class ArgOptionsApp(App[None]):
     @work(thread=True, exclusive=True, name="discover")
     def _discover(self) -> None:
         from arg_options.core.discovery import DiscoveryEngine, Opportunity
+        import logging
+
+        # Enable debug logging for discovery
+        logging.getLogger('arg_options.core.discovery').setLevel(logging.DEBUG)
 
         try:
             self.call_from_thread(self._status, "Discovering opportunities...")
             self.call_from_thread(self._log, "Running discovery...")
-            config = load_settings(self._mode)
-            engine = DiscoveryEngine(config)
+            
+            # Use shared settings pattern through account service
+            service = AccountService(mode=self._mode)
+            engine = DiscoveryEngine(service.config)
             opps = engine.run()
             self._discovery_opps = opps
             msg = f"Discovery: {len(opps)} opportunities"
@@ -778,19 +786,21 @@ class ArgOptionsApp(App[None]):
         except Exception as e:
             self.call_from_thread(self._log, f"[red]Discovery error:[/red] {e}")
             self.call_from_thread(self._status, f"Discovery error: {e}")
+            import traceback
+            self.call_from_thread(self._log, f"[dim]{traceback.format_exc()}[/dim]")
 
     @work(thread=True, exclusive=True, name="sync-journal")
     def _sync_journal(self) -> None:
-        from arg_options.core.journal import summarize_pnl, sync_journal
+        from arg_options.core.journal import summarize_pnl
 
         try:
             self.call_from_thread(self._status, "Syncing journal...")
             self.call_from_thread(self._log, "Syncing journal / P&L...")
-            config = load_settings(self._mode)
-            broker = create_broker(config)
-            broker.connect()
-            summary = sync_journal(broker, config)
-            pnl = summarize_pnl(config)
+            
+            # Use shared journal service
+            service = JournalService(mode=self._mode)
+            summary = service.sync_and_summarize()
+            pnl = summarize_pnl(service.config)
             self.call_from_thread(
                 self._log, f"[green]Journal synced[/green]"
             )
@@ -808,8 +818,10 @@ class ArgOptionsApp(App[None]):
         try:
             self.call_from_thread(self._status, "Running alerts...")
             self.call_from_thread(self._log, "Running alerts...")
-            config = load_settings(self._mode)
-            results = run_alerts_once(config)
+            
+            # Use shared settings pattern through account service
+            service = AccountService(mode=self._mode)
+            results = run_alerts_once(service.config)
             msg = f"Alerts executed: {results}"
             self.call_from_thread(self._log, f"[green]{msg}[/green]")
             self.call_from_thread(self._append_result, "Alerts", str(results)[:80])
@@ -823,12 +835,13 @@ class ArgOptionsApp(App[None]):
         try:
             self.call_from_thread(self._status, "Testing login...")
             self.call_from_thread(self._log, "Testing PPI API connection...")
-            config = load_settings(self._mode)
-            broker = create_broker(config)
-            broker.connect()
-            accounts = broker.account.get_accounts()
+            
+            # Use shared account service
+            service = AccountService(mode=self._mode)
+            accounts = service.get_account_status()
             msg = f"Login OK — {len(accounts)} account(s)"
-            for acc in accounts:
+            for acc_info in accounts:
+                acc = acc_info["account"]
                 msg += f" [{acc.account_number} {acc.name}]"
             self.call_from_thread(self._log, f"[green]{msg}[/green]")
             self.call_from_thread(self._append_result, "Login", msg)
@@ -842,10 +855,10 @@ class ArgOptionsApp(App[None]):
         try:
             self.call_from_thread(self._status, "Fetching orders...")
             self.call_from_thread(self._log, "Fetching active orders...")
-            config = load_settings(self._mode)
-            broker = create_broker(config)
-            broker.connect()
-            active = broker.orders.get_active_orders(config.account_number)
+            
+            # Use shared account service
+            service = AccountService(mode=self._mode)
+            active = service.get_active_orders()
             if not active:
                 self.call_from_thread(self._log, "[yellow]No active orders[/yellow]")
                 self.call_from_thread(self._status, "No active orders")
@@ -871,17 +884,14 @@ class ArgOptionsApp(App[None]):
     @work(thread=True, exclusive=True, name="cancel-single")
     def _cancel_single_order(self, order_id: int) -> None:
         try:
-            config = load_settings(self._mode)
-            if not config.allow_live_orders:
-                self.call_from_thread(
-                    self._log, "[red]ERROR:[/red] allow_live_orders is FALSE"
-                )
+            if not self._check_live_allowed():
                 return
-            broker = create_broker(config)
-            broker.connect()
-            result = broker.orders.cancel_order(config.account_number, order_id)
+            
+            # Use shared account service
+            service = AccountService(mode=self._mode)
+            result = service.cancel_orders(order_id=order_id)
             self.call_from_thread(
-                self._log, f"[green]Order #{order_id} cancelled: {result.status}[/green]"
+                self._log, f"[green]{result}[/green]"
             )
             self.call_from_thread(self._status, f"Order #{order_id} cancelled")
         except Exception as e:

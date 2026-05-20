@@ -35,6 +35,7 @@ class PpiMarketDataService(MarketDataService):
             data = self._ppi.marketdata.search_instrument(
                 ticker, name or "", market or "", instrument_type or ""
             )
+            print(f"DEBUG: PPI returned {len(data)} instruments for {ticker}")
             return [
                 Instrument(
                     ticker=d.get("ticker", ""),
@@ -46,6 +47,7 @@ class PpiMarketDataService(MarketDataService):
                 for d in data
             ]
         except Exception as e:
+            print(f"DEBUG: PPI search failed for {ticker}: {e}")
             raise BrokerError(str(e)) from e
 
     def get_historical(

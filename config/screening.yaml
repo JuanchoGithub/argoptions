@@ -1,12 +1,12 @@
 # Filtros de pantalla (todos opcionales; se omiten si no están)
 
-min_days_to_expiry: 0
-max_days_to_expiry: 45
-min_open_interest_proxy_volume: 0
-max_bid_ask_spread_pct_mid: 35
-min_abs_delta: 0
-max_abs_delta: 0.99
-min_underlying_vs_strike_pct_otm_call: 0
+screening:
+  dte_min: 0          # At least 0 days to expiry (allow all)
+  dte_max: 60         # Max 60 days 
+  volume_min: 0       # Allow zero volume (common in stored data)
+  max_spread_pct: 1.0 # Max 100% spread (very permissive for stored data)
+  delta_min: -1.0     # Allow all delta values (stored data has mostly zeros)
+  delta_max: 1.0     # Allow all delta values
 
 alerts:
   min_interval_seconds: 3600
