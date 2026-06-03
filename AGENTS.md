@@ -55,11 +55,39 @@ Tests have been removed.
 | `w` | Toggle auto-refresh watch |
 | `t` | Toggle test/production |
 | `o` | Active orders |
-| `r` | Discovery results (cached) |
+| `r` | Discovery results (full-screen browse, click card → detail + budget + save) |
 | `v` | Approval queue |
-| `n` | New strategy |
+| `n` | Saved strategies (list + New button) |
 | `?` | Help |
 | `q` | Quit |
+
+## Discovery assessment flow
+
+- Press `d` → runs discovery engine → grades opportunities A/B/C/F (A = iron condor / OTM spreads, ROC > 15%; B = near-ATM spreads, ROC > 5%; C = deep ITM; F = noise/stale)
+- Top 10 shown in log; press `r` for full-screen list of all 39-60 opps
+- Click `▶ Details` on any card → `OpportunityDetailScreen`:
+  - Full leg layout, metrics, ROC, warning
+  - **Budget input** (max risk $) — position sizing auto-calculates (contracts × risk)
+  - **Save to Engine** → writes to `strategies` table in `data/journal.db` as pending
+- Press `n` to see all saved strategies with leg structures displayed
+- `d` skips re-running discovery if chain unchanged (checks `data/last_discovery.json`)
+
+## Crash logging
+
+- **Shell level**: `_bootstrap.sh` tees stderr to `data/run-YYYYMMDD-HHMMSS.log` (ANSI + all output)
+- **Python level**: `CrashLogger` in `tui_app.py` sets `sys.excepthook` + asyncio exception handler → writes plain text to `data/crash.log`
+- stderr is also redirected to `_StderrLogger` which writes to `data/crash.log`
+- Check both files on any unexpected TUI exit
+
+## Persisted data files
+
+| File | Purpose |
+|---|---|
+| `data/chains/chain_*.parquet` | Chain data (timestamped) |
+| `data/last_discovery.json` | Cached discovery results (auto-loaded on TUI start if chain unchanged) |
+| `data/run-*.log` | stderr capture from shell launch |
+| `data/crash.log` | Python unhandled exceptions |
+| `data/journal.db` | SQLite: journal, orders, positions, strategies, approvals |
 
 ## Known quirks
 
@@ -67,4 +95,7 @@ Tests have been removed.
 - **Textual `RichLog` has no selection/copy.** The TUI's `_log()` also writes to `data/arg_options.log` via Python logging, stripped of Rich markup. Run `tail -f data/arg_options.log` alongside the TUI.
 - **PPI sandbox rate limit:** 10 calls/hour. Error message shown in TUI when hit. Use `--stored` flag in screening subcommand where possible to reuse last chain data.
 - **`resolve_project_root()`** walks up from the file's location looking for `.env_test`. Multiple implementations exist (`config_persist.py`, `settings.py`, `db.py`) — keep in sync.
-- **Chain data is persisted** as Parquet in `data/chains/` (timestamped) and as `data/last_chain.parquet` (latest).
+- **Chain data is persisted** as Parquet in `data/chains/` (timestamped).
+- **Strike scaling**: BYMA raw strike from ticker is /10 (not /100). GFGC74307J → strike 7430.7 vs spot ~7420.
+- **Intrinsic value guard**: Chain builder skips rows where `mid < 0.9 * intrinsic` to filter out deep-ITM pre-split artifacts.
+- **Python version**: `.venv` may be Python 3.11 while system is newer. `Path.write_text(append=)` is 3.13+ — use `open(mode='a')` instead.
