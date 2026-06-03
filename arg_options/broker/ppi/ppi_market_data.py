@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any, Optional
 
@@ -7,6 +8,12 @@ from arg_options.broker.exceptions import BrokerError
 from arg_options.broker.interfaces import MarketDataService
 from arg_options.broker.models import Book, BookEntry, Instrument, IntradayPoint, MarketDataPoint
 from ppi_client.models.estimate_bonds import EstimateBonds
+
+
+logger = logging.getLogger(__name__)
+
+
+PPI_SEARCH_INSTRUMENT = "1.0/MarketData/SearchInstrument"
 
 
 def _parse_datetime(value: Any) -> Optional[datetime]:
@@ -32,10 +39,12 @@ class PpiMarketDataService(MarketDataService):
         instrument_type: Optional[str] = None,
     ) -> list[Instrument]:
         try:
-            data = self._ppi.marketdata.search_instrument(
-                ticker, name or "", market or "", instrument_type or ""
-            )
-            print(f"DEBUG: PPI returned {len(data)} instruments for {ticker}")
+            params = {"ticker": ticker, "name": name or ""}
+            if market:
+                params["market"] = market
+            if instrument_type:
+                params["type"] = instrument_type
+            data = self._ppi._PPI__apiClient.get(PPI_SEARCH_INSTRUMENT, params=params)
             return [
                 Instrument(
                     ticker=d.get("ticker", ""),
@@ -47,8 +56,14 @@ class PpiMarketDataService(MarketDataService):
                 for d in data
             ]
         except Exception as e:
-            print(f"DEBUG: PPI search failed for {ticker}: {e}")
-            raise BrokerError(str(e)) from e
+            err = str(e)
+            if "too many arguments" in err.lower():
+                logger.warning(
+                    "PPI sandbox SearchInstrument endpoint is unavailable "
+                    "(returns 400). Try loading from stored chain data."
+                )
+                return []
+            raise BrokerError(err) from e
 
     def get_historical(
         self,

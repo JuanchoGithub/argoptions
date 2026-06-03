@@ -48,7 +48,7 @@ def search_instruments(
     broker: Broker,
     ticker: str,
     instrument_type: str = "OPCIONES",
-    market: str = "BYMA",
+    market: str = "Byma",
 ) -> list[Instrument]:
     return broker.market_data.search_instruments(
         ticker=ticker,

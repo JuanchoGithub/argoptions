@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
+import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +35,7 @@ from arg_options.config.config_persist import (
     save_chain_profile,
     save_screening_file,
 )
+from arg_options.core.discovery import Opportunity, Leg
 from arg_options.services.account_service import AccountService
 from arg_options.services.chain_service import ChainService
 from arg_options.services.journal_service import JournalService
@@ -121,6 +125,28 @@ LogViewerScreen > #dialog > #log-title { text-style: bold; text-align: center; m
 LogViewerScreen > #dialog > #log-content { width: 1fr; height: 1fr; margin: 0 0 1 0; }
 LogViewerScreen > #dialog > Horizontal { height: auto; align: center middle; }
 LogViewerScreen > #dialog > Horizontal > Button { margin: 0 1; }
+
+DiscoveryResultScreen { background: $surface; }
+DiscoveryResultScreen #dr-title { dock: top; height: 1; text-align: center; text-style: bold; padding: 1 0; }
+DiscoveryResultScreen #dr-scroll { height: 1fr; }
+DiscoveryResultScreen #dr-close { dock: bottom; width: 100%; }
+DiscoveryResultScreen .opp-card { height: auto; border: solid $border; margin: 0 0 1 0; padding: 1; }
+DiscoveryResultScreen .opp-btn { width: auto; min-width: 12; margin: 1 0 0 0; }
+
+OpportunityDetailScreen { background: $surface; }
+OpportunityDetailScreen #od-title { dock: top; height: 1; text-align: center; text-style: bold; padding: 1 0; }
+OpportunityDetailScreen #od-body { height: 1fr; padding: 0 2; }
+OpportunityDetailScreen #od-body Label { margin: 0 0 0 0; }
+OpportunityDetailScreen #od-actions { dock: bottom; height: auto; align: center middle; margin: 1 0; }
+OpportunityDetailScreen #od-actions > Button { margin: 0 1; min-width: 16; }
+OpportunityDetailScreen .sizing-box { width: 30; height: 3; border: solid $border; padding: 0 1; margin: 0 0 0 2; }
+
+StrategiesScreen { background: $surface; }
+StrategiesScreen #st-title { dock: top; height: 1; text-align: center; text-style: bold; padding: 1 0; }
+StrategiesScreen #st-scroll { height: 1fr; }
+StrategiesScreen .st-card { height: auto; border: solid $border; margin: 0 0 1 0; padding: 1; }
+StrategiesScreen #st-actions { dock: bottom; height: auto; align: center middle; margin: 1 0; }
+StrategiesScreen #st-actions > Button { margin: 0 1; min-width: 16; }
 """
 
 
@@ -230,6 +256,223 @@ class OpportunityApprovalScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+class DiscoveryResultScreen(ModalScreen[None]):
+    def __init__(self, opps: list[Any]) -> None:
+        super().__init__()
+        from arg_options.core.discovery import assess_all, grade_counts
+        self._assessed = assess_all(opps)
+        self._counts = grade_counts(self._assessed)
+
+    def compose(self) -> ComposeResult:
+        total = len(self._assessed)
+        grade_str = "  ".join(
+            f"{g}{self._counts.get(g, 0)}" for g in ("A", "B", "C", "F")
+        )
+        yield Label(f"Discovery Results ({total}) — {grade_str}", id="dr-title")
+        colors = {"A": "green", "B": "yellow", "C": "dim", "F": "red"}
+        cards: list[Vertical] = []
+        for idx, (opp, a) in enumerate(self._assessed):
+            color = colors.get(a.grade, "white")
+            children: list[Label] = [
+                Label(f"[bold {color}]{a.grade}[/bold {color}]  {opp.strategy} — {a.tag}"),
+                Label(f"  {a.summary}"),
+            ]
+            if a.warning:
+                children.append(Label(f"  [red]\u26a0 {a.warning}[/red]"))
+            children.append(Label(f"  [dim]{a.detail.replace(chr(10), ' | ')}[/dim]"))
+            children.append(Button("▶ Details", id=f"opp-btn-{idx}", classes="opp-btn"))
+            cards.append(Vertical(*children, classes="opp-card"))
+        yield ScrollableContainer(*cards, id="dr-scroll")
+        yield Button("Close", variant="primary", id="dr-close")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "dr-close":
+            self.dismiss(None)
+        elif event.button.id and event.button.id.startswith("opp-btn-"):
+            idx = int(event.button.id.split("-")[-1])
+            opp, a = self._assessed[idx]
+            self.app.push_screen(OpportunityDetailScreen(opp, a))
+
+
+def _compute_position(opp: Opportunity, budget: float) -> dict:
+    strat = opp.strategy
+    m = opp.metrics
+    if strat in ("bear_call_spread", "bull_put_spread"):
+        risk_per = max(0, m.get("width", 1) - m.get("credit", 0))
+        contracts = int(budget // risk_per) if risk_per > 0 else 0
+    elif strat == "iron_condor":
+        risk_per = max(0, m.get("max_loss", 1))
+        contracts = int(budget // risk_per) if risk_per > 0 else 0
+    elif strat == "mariposa":
+        risk_per = max(0, m.get("cost", 1))
+        contracts = int(budget // risk_per) if risk_per > 0 else 0
+    elif strat == "synthetic":
+        risk_per = max(0, abs(m.get("cost", 1)))
+        contracts = int(budget // risk_per) if risk_per > 0 else 0
+    elif strat == "calendar":
+        risk_per = max(0, m.get("cost", 1))
+        contracts = int(budget // risk_per) if risk_per > 0 else 0
+    else:
+        risk_per = 0
+        contracts = 0
+    contracts = max(0, contracts)
+    return {
+        "contracts": contracts,
+        "risk_per": risk_per,
+        "total_risk": risk_per * contracts,
+        "total_credit": contracts * (m.get("credit") or m.get("net_credit") or m.get("cost") or 0),
+    }
+
+
+class OpportunityDetailScreen(ModalScreen[None]):
+    def __init__(self, opp: Opportunity, assessment: Any) -> None:
+        super().__init__()
+        self._opp = opp
+        self._a = assessment
+
+    def compose(self) -> ComposeResult:
+        opp, a = self._opp, self._a
+        colors = {"A": "green", "B": "yellow", "C": "dim", "F": "red"}
+        color = colors.get(a.grade, "white")
+        yield Label(
+            f"[bold {color}]{a.grade}[/bold {color}]  {opp.strategy} — {a.tag}",
+            id="od-title",
+        )
+        m = opp.metrics
+        with ScrollableContainer(id="od-body"):
+            yield Label("[bold]Legs[/bold]")
+            for l in opp.legs:
+                yield Label(f"  {l.side:4s} {l.ticker}  strike={l.strike:.0f}  {l.right:4s}  x{l.qty}")
+            yield Label("")
+            metric_line = "  ".join(f"{k}={v}" for k, v in sorted(m.items()))
+            yield Label(f"[bold]Metrics:[/bold] {metric_line}")
+            yield Label(f"[bold]ROC:[/bold] {a.roc:.1%}")
+            if a.warning:
+                yield Label(f"[red]\u26a0 {a.warning}[/red]")
+            yield Label("")
+            yield Label("[bold]Position Sizing[/bold]")
+            budget_default = int(
+                (m.get("width", 0) or m.get("max_loss", 0) or m.get("cost", 0) or 500) * 2
+            )
+            with Horizontal():
+                yield Input(
+                    value=str(budget_default),
+                    id="od-budget",
+                    placeholder="Max risk ($)",
+                )
+                yield Static(id="od-sizing", classes="sizing-box")
+        with Horizontal(id="od-actions"):
+            yield Button("Save to Engine", variant="success", id="od-save")
+            yield Button("Cancel", variant="primary", id="od-close")
+
+    def on_mount(self) -> None:
+        self._update_sizing()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "od-budget":
+            self._update_sizing()
+
+    def _update_sizing(self) -> None:
+        try:
+            budget_str = self.query_one("#od-budget", Input).value.strip()
+            budget = float(budget_str) if budget_str else 0
+        except ValueError:
+            budget = 0
+        pos = _compute_position(self._opp, budget)
+        sizing = self.query_one("#od-sizing", Static)
+        if pos["contracts"] <= 0 or budget <= 0:
+            sizing.update("[dim]Enter a budget to see position sizing[/dim]")
+            return
+        sizing.update(
+            f"[bold]{pos['contracts']} contract(s)[/bold]\n"
+            f"Risk: ${pos['total_risk']:.0f}\n"
+            f"{'Credit' if self._opp.side == 'SELL' else 'Cost'}: ${pos['total_credit']:.0f}"
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "od-close":
+            self.dismiss(None)
+        elif event.button.id == "od-save":
+            try:
+                budget_str = self.query_one("#od-budget", Input).value.strip()
+                budget = float(budget_str) if budget_str else 0
+            except ValueError:
+                budget = 0
+            pos = _compute_position(self._opp, budget)
+            entry = {
+                "root": self._opp.root,
+                "strategy": self._opp.strategy,
+                "side": self._opp.side,
+                "assessment_grade": self._a.grade,
+                "assessment_tag": self._a.tag,
+                "budget": budget,
+                "contracts": pos["contracts"],
+                "risk_per": pos["risk_per"],
+                "total_risk": pos["total_risk"],
+                "total_credit": pos["total_credit"],
+                "legs": [
+                    {"ticker": l.ticker, "side": l.side, "strike": l.strike, "right": l.right, "qty": l.qty * max(pos["contracts"], 1)}
+                    for l in self._opp.legs
+                ],
+                "metrics": dict(self._opp.metrics),
+                "status": "pending",
+            }
+            from arg_options.db import save_strategy
+            save_strategy(
+                f"{self._opp.strategy}_{self._opp.root}_{self._a.grade}",
+                self._opp.strategy,
+                entry,
+            )
+            app = self.app
+            if isinstance(app, ArgOptionsApp):
+                app._log(f"[green]Opportunity saved to engine:[/green] {self._opp.strategy} {self._opp.root} ({pos['contracts']} ctcts)")
+            self.dismiss(None)
+
+
+class StrategiesScreen(ModalScreen[None]):
+    def compose(self) -> ComposeResult:
+        strategies = get_strategies(enabled_only=False)
+        yield Label(f"Saved Strategies ({len(strategies)})", id="st-title")
+        with ScrollableContainer(id="st-scroll"):
+            if not strategies:
+                yield Label("[dim]No saved strategies.[/dim]")
+            for s in strategies:
+                cfg = s.get("config", {})
+                strat_type = cfg.get("strategy", s["type"])
+                grade = cfg.get("assessment_grade", "?")
+                contracts = cfg.get("contracts", 0)
+                leg_lines = []
+                for l in cfg.get("legs", []):
+                    leg_lines.append(
+                        f"    {l['side']:4s} {'CALL' if l.get('right') in ('CALL','') else 'PUT':4s}  strike={l['strike']:.0f}"
+                    )
+                with Vertical(classes="st-card"):
+                    yield Label(
+                        f"[bold]{strat_type}[/bold]  grade={grade}  "
+                        f"contracts={contracts}  status={s.get('status', '?')}"
+                    )
+                    yield Label(
+                        f"[dim]  Budget: ${cfg.get('budget', 0):.0f}  "
+                        f"Risk: ${cfg.get('total_risk', 0):.0f}  "
+                        f"Credit: ${cfg.get('total_credit', 0):.0f}[/dim]"
+                    )
+                    if leg_lines:
+                        yield Label(f"  [dim]{chr(10).join(leg_lines)}[/dim]")
+        with Horizontal(id="st-actions"):
+            yield Button("New Strategy", variant="success", id="st-new")
+            yield Button("Close", variant="primary", id="st-close")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "st-new":
+            self.dismiss(None)
+            from arg_options.ui.tui_app import ArgOptionsApp
+            app = self.app
+            if isinstance(app, ArgOptionsApp):
+                app.push_screen(StrategyConfigScreen())
+        elif event.button.id == "st-close":
+            self.dismiss(None)
+
+
 class StrategyConfigScreen(ModalScreen[Optional[dict]]):
     def __init__(self, strategy: Optional[dict] = None) -> None:
         super().__init__()
@@ -322,6 +565,46 @@ class LogViewerScreen(ModalScreen[None]):
             self.dismiss(None)
 
 
+class CrashLogger:
+    _file: Path | None = None
+
+    @classmethod
+    def setup(cls) -> None:
+        cls._file = resolve_project_root() / "data" / "crash.log"
+        cls._file.parent.mkdir(parents=True, exist_ok=True)
+
+        def _write(msg: str) -> None:
+            if cls._file:
+                with open(cls._file, "a", encoding="utf-8") as f:
+                    f.write(f"{datetime.now().isoformat()} {msg}\n")
+
+        def _excepthook(typ, val, tb) -> None:
+            _write("UNHANDLED EXCEPTION\n" + "".join(traceback.format_exception(typ, val, tb)))
+
+        sys.excepthook = _excepthook
+
+        def _asyncio_handler(loop, context) -> None:
+            _write(f"ASYNCIO EXCEPTION\n{context.get('message', '')}\n{traceback.format_exc()}")
+
+        try:
+            asyncio.get_event_loop().set_exception_handler(_asyncio_handler)
+        except RuntimeError:
+            pass
+
+        class _StderrLogger:
+            def write(self, buf: str) -> None:
+                if buf.strip():
+                    _write(f"STDERR: {buf.rstrip()}")
+
+            def flush(self) -> None:
+                pass
+
+        sys.stderr = _StderrLogger()  # type: ignore[assignment]
+
+
+CrashLogger.setup()
+
+
 class ArgOptionsApp(App[None]):
     DEFAULT_CSS = HEADER_BAR + LEFT_PANEL + RIGHT_PANEL + MODAL_CSS
 
@@ -338,6 +621,7 @@ class ArgOptionsApp(App[None]):
         Binding("t", "toggle_env", "Test↔Prod"),
         Binding("o", "show_orders", "Orders"),
         Binding("v", "approval_queue", "Approvals"),
+        Binding("r", "show_discovery", "Discovery Rs"),
         Binding("n", "new_strategy", "New Strat"),
         Binding("question_mark", "show_help", "Help"),
     ]
@@ -353,6 +637,7 @@ class ArgOptionsApp(App[None]):
         self._watch_on = watch_interval_s is not None
         self._watch_timer: Optional[str] = None
         self._discovery_opps: list[Any] = []
+        self._discovery_chain: str = ""
         init_db()
 
     @property
@@ -452,13 +737,82 @@ class ArgOptionsApp(App[None]):
             return " [PRODUCTION] LIVE TRADING "
         return " [TEST] Sandbox "
 
+    # ---- Discovery persistence ----
+
+    @property
+    def _discovery_path(self) -> Path:
+        return resolve_project_root() / "data" / "last_discovery.json"
+
+    @property
+    def _latest_chain_name(self) -> str:
+        chains_dir = resolve_project_root() / "data" / "chains"
+        if not chains_dir.exists():
+            return ""
+        files = sorted(chains_dir.glob("chain_*.parquet"), reverse=True)
+        return files[0].name if files else ""
+
+    def _save_discovery(self) -> None:
+        if not self._discovery_opps:
+            return
+        import json
+        chain_name = self._latest_chain_name
+        self._discovery_chain = chain_name
+        payload = {
+            "chain": chain_name,
+            "saved_at": datetime.now().isoformat(),
+            "opportunities": [
+                {
+                    "root": o.root,
+                    "strategy": o.strategy,
+                    "side": o.side,
+                    "confidence": o.confidence,
+                    "legs": [
+                        {"ticker": l.ticker, "side": l.side, "qty": l.qty,
+                         "strike": l.strike, "right": l.right, "bid": l.bid, "ask": l.ask}
+                        for l in o.legs
+                    ],
+                    "metrics": dict(o.metrics),
+                }
+                for o in self._discovery_opps
+            ],
+        }
+        self._discovery_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _load_discovery(self) -> None:
+        path = self._discovery_path
+        if not path.exists():
+            return
+        import json
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return
+        chain_name = payload.get("chain", "")
+        if chain_name != self._latest_chain_name:
+            self._log("[dim]Saved discovery is stale (chain changed)[/dim]")
+            return
+        raw = payload.get("opportunities", [])
+        self._discovery_opps = [
+            Opportunity(
+                root=o["root"], strategy=o["strategy"], side=o["side"],
+                confidence=o["confidence"],
+                legs=[Leg(**l) for l in o["legs"]],
+                metrics=o.get("metrics", {}),
+            )
+            for o in raw
+        ]
+        self._discovery_chain = chain_name
+        self._log(f"[green]Loaded {len(self._discovery_opps)} cached discovery results[/green]")
+
     def on_mount(self) -> None:
+        self._init_file_logging()
         table = self.query_one("#results-table", DataTable)
         table.add_columns("Time", "Action", "Result")
         self._log("argoptions TUI started")
         self._log(f"Mode: {self._mode.upper()}")
 
         self._populate_form()
+        self._load_discovery()
         self._status(f"Ready — {self._mode.upper()} mode")
 
         if self._watch_on and self._watch_interval_s:
@@ -468,10 +822,32 @@ class ArgOptionsApp(App[None]):
         bar = self.query_one("#status-bar", Static)
         bar.update(f" {msg}")
 
+    def _init_file_logging(self) -> None:
+        try:
+            LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            for h in logging.getLogger().handlers:
+                if isinstance(h, logging.FileHandler) and h.baseFilename == str(LOG_FILE):
+                    return
+            handler = logging.FileHandler(str(LOG_FILE), encoding="utf-8")
+            handler.setLevel(logging.DEBUG)
+            handler.setFormatter(
+                logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+            )
+            root = logging.getLogger()
+            root.setLevel(logging.DEBUG)
+            root.addHandler(handler)
+        except Exception:
+            pass
+
     def _log(self, msg: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
-        log = self.query_one("#log-panel", RichLog)
-        log.write(f"[dim]{ts}[/dim] {msg}")
+        try:
+            log = self.query_one("#log-panel", RichLog)
+            log.write(f"[dim]{ts}[/dim] {msg}")
+        except Exception:
+            pass
+        plain = re.sub(r'\[/?\w+\]', '', msg)
+        logger.info("TUI: %s", plain)
 
     def _append_result(self, action: str, result: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
@@ -635,6 +1011,12 @@ class ArgOptionsApp(App[None]):
     def action_discover(self) -> None:
         self._discover()
 
+    def action_show_discovery(self) -> None:
+        if not self._discovery_opps:
+            self._log("[yellow]No discovery results cached — press [bold]d[/bold] to run discovery[/yellow]")
+            return
+        self.push_screen(DiscoveryResultScreen(self._discovery_opps))
+
     def action_journal(self) -> None:
         self._sync_journal()
 
@@ -651,7 +1033,7 @@ class ArgOptionsApp(App[None]):
         self._show_approvals()
 
     def action_new_strategy(self) -> None:
-        self._new_strategy()
+        self.push_screen(StrategiesScreen())
 
     def _check_live_allowed(self) -> bool:
         if self._mode == "production":
@@ -760,29 +1142,53 @@ class ArgOptionsApp(App[None]):
 
     @work(thread=True, exclusive=True, name="discover")
     def _discover(self) -> None:
-        from arg_options.core.discovery import DiscoveryEngine, Opportunity
+        from arg_options.core.discovery import (
+            DiscoveryEngine, Opportunity, assess_all, grade_counts,
+        )
         import logging
 
-        # Enable debug logging for discovery
         logging.getLogger('arg_options.core.discovery').setLevel(logging.DEBUG)
 
         try:
-            self.call_from_thread(self._status, "Discovering opportunities...")
-            self.call_from_thread(self._log, "Running discovery...")
-            
-            # Use shared settings pattern through account service
-            service = AccountService(mode=self._mode)
-            engine = DiscoveryEngine(service.config)
-            opps = engine.run()
+            current_chain = self._latest_chain_name
+            if self._discovery_opps and self._discovery_chain == current_chain:
+                opps = self._discovery_opps
+                self.call_from_thread(self._log, "[green]Chain unchanged — using cached discovery[/green]")
+            else:
+                self.call_from_thread(self._status, "Discovering opportunities...")
+                self.call_from_thread(self._log, "Running discovery...")
+
+                service = AccountService(mode=self._mode)
+                engine = DiscoveryEngine(service.config)
+                opps = engine.run()
             self._discovery_opps = opps
-            msg = f"Discovery: {len(opps)} opportunities"
-            self.call_from_thread(self._log, f"[green]{msg}[/green]")
-            self.call_from_thread(self._append_result, "Discovery", msg)
-            for opp in opps[:10]:
+            assessed = assess_all(opps)
+            counts = grade_counts(assessed)
+
+            total = len(opps)
+            grade_str = "  ".join(
+                f"{grade}{counts.get(grade, 0)}" for grade in ("A", "B", "C", "F")
+            )
+            self.call_from_thread(self._log, f"[green]Discovery: {total} opportunities[/green]")
+            self.call_from_thread(self._log, f"[bold]Grades:[/bold] {grade_str}")
+            self.call_from_thread(self._log, f"[bold]Top picks:[/bold]")
+
+            shown = 0
+            for opp, a in assessed:
+                if shown >= 10:
+                    break
+                color = {"A": "green", "B": "yellow", "C": "dim", "F": "red"}.get(a.grade, "white")
+                prefix = {"A": " \u25b6", "B": " \u25b8", "C": "  ", "F": " \u2716"}.get(a.grade, "  ")
                 self.call_from_thread(
-                    self._log, f"  [cyan]{opp}[/cyan]"
+                    self._log,
+                    f"  {prefix} [bold {color}]{a.grade}[/bold {color}] {a.summary}",
                 )
-            self.call_from_thread(self._status, msg)
+                shown += 1
+
+            self.call_from_thread(self._log, f"[dim]Press [bold]r[/bold] to browse all, [bold]v[/bold] for approvals, [bold]n[/bold] for new strategy[/dim]")
+            self.call_from_thread(self._append_result, "Discovery", f"{total} opps ({grade_str})")
+            self.call_from_thread(self._status, f"Discovery: {total} opps")
+            self._save_discovery()
         except Exception as e:
             self.call_from_thread(self._log, f"[red]Discovery error:[/red] {e}")
             self.call_from_thread(self._status, f"Discovery error: {e}")

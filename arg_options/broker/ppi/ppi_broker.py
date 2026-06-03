@@ -39,6 +39,12 @@ def _ensure_file_logging() -> None:
     try:
         from arg_options.config.config_persist import resolve_project_root
         log_path = resolve_project_root() / "data" / "arg_options.log"
+
+        # TUI may have already set up a handler for this path
+        for h in logging.getLogger().handlers:
+            if isinstance(h, logging.FileHandler) and h.baseFilename == str(log_path):
+                return
+
         log_path.parent.mkdir(parents=True, exist_ok=True)
         handler = logging.FileHandler(str(log_path), encoding="utf-8")
         handler.setLevel(logging.DEBUG)

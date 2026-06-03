@@ -41,6 +41,10 @@ if [ ! -f "config/strategies.yaml" ]; then
     echo "strategies: []" >> config/strategies.yaml
 fi
 
+# ---- Redirect stderr to both terminal and log file ----
+LOGFILE="data/run-$(date +%Y%m%d-%H%M%S).log"
+exec 2> >(tee -a "$LOGFILE" >&2)
+
 # ---- Check env files ----
 if [ ! -f ".env_test" ]; then
     echo "⚠️  No .env_test found — create one with your PPI sandbox credentials."

@@ -16,6 +16,16 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class Assessment:
+    grade: str      # A / B / C / F
+    tag: str        # short label like "OTM credit spread"
+    summary: str    # one-liner for the log
+    detail: str     # multi-line for the modal
+    roc: float      # return on capital (credit/width or similar)
+    warning: str    # empty string if none
+
+
+@dataclass
 class Leg:
     ticker: str
     side: str
@@ -95,13 +105,15 @@ class DiscoveryEngine:
         volume_min = self._rules.get("volume_min", 0)
         max_spread = self._rules.get("max_spread_pct", 1.0)
         
-        logger.info(f"Screening rules: DTE {dte_min}-{dte_max}, Volume >= {volume_min}, Spread <= {max_spread}")
+        logger.info(f"Screening rules: DTE {dte_min}-{dte_max}, Volume >= {volume_min}, Spread <= {max_spread}, Bid>0, Ask>0")
 
         mask = (
             (df["dte"] >= dte_min)
             & (df["dte"] <= dte_max)
             & (df["volume"] >= volume_min)
             & (df["spread_pct"] <= max_spread)
+            & (df["bid"] > 0)
+            & (df["ask"] > 0)
         )
         screened = df[mask].copy()
         logger.info(f"Screening filtered {len(df) - len(screened)} rows, {len(screened)} remaining")
@@ -278,7 +290,7 @@ class DiscoveryEngine:
                                 strike=float(buy["strike"]), right="CALL",
                                 bid=float(buy["bid"]), ask=float(buy["ask"])),
                         ],
-                        metrics={"credit": round(credit, 2), "width": round(width, 2)},
+                        metrics={"credit": round(credit, 2), "width": round(width, 2), "spot": round(spot, 2)},
                     ))
 
             bull_puts = puts[puts["strike"] >= spot]
@@ -301,8 +313,8 @@ class DiscoveryEngine:
                                 strike=float(buy["strike"]), right="PUT",
                                 bid=float(buy["bid"]), ask=float(buy["ask"])),
                         ],
-                        metrics={"credit": round(credit, 2), "width": round(width, 2)},
-                    ))
+                metrics={"credit": round(credit, 2), "width": round(width, 2), "spot": round(spot, 2)},
+            ))
         return opportunities
 
     def _find_synthetic(self, df: pd.DataFrame) -> list[Opportunity]:
@@ -350,3 +362,170 @@ class DiscoveryEngine:
                     },
                 ))
         return opportunities
+
+
+def _min_vol(opp: Opportunity) -> float:
+    return min((l.bid + l.ask) for l in opp.legs if l.bid > 0 and l.ask > 0)
+
+
+def assess_opportunity(opp: Opportunity) -> Assessment:
+    strat = opp.strategy
+    legs = opp.legs
+    metrics = opp.metrics
+    min_volume = _min_vol(opp)
+
+    if strat in ("bear_call_spread", "bull_put_spread"):
+        credit = metrics.get("credit", 0)
+        width = metrics.get("width", 1)
+        spot = metrics.get("spot", 0)
+        roc = credit / width if width > 0 else 0
+
+        sell_leg = legs[0]
+        buy_leg = legs[1]
+        sell_bid = sell_leg.bid
+        buy_ask = buy_leg.ask
+
+        if roc < 0.02:
+            return Assessment("F", "Noise",
+                f"{strat} credit={credit:.0f} width={width:.0f} — too small to trade",
+                f"Credit of {credit:.0f} on {width:.0f} width is effectively noise.",
+                roc, "Credit near zero")
+        if buy_ask == 0 or sell_bid == 0:
+            return Assessment("F", "No liquidity",
+                f"{strat} — buy leg has no ask or sell leg has no bid",
+                f"One leg has zero bid/ask. Unreliable pricing.",
+                roc, "Missing market data")
+
+        itm_depth = 0.0
+        if strat == "bear_call_spread" and spot > 0:
+            itm_depth = max(0, spot - sell_leg.strike) / spot
+        elif strat == "bull_put_spread" and spot > 0:
+            itm_depth = max(0, sell_leg.strike - spot) / spot
+
+        warning = ""
+        if itm_depth > 0.05:
+            warning = f"Deep ITM ({itm_depth:.0%} below spot) — most credit is intrinsic"
+
+        if itm_depth > 0.15:
+            return Assessment("C", "Deep ITM spread",
+                f"{strat} {sell_leg.strike:.0f}/{buy_leg.strike:.0f}  credit={credit:.0f}  roc={roc:.0%}",
+                f"Sell {sell_leg.ticker} @ {sell_bid:.2f}\n"
+                f"Buy  {buy_leg.ticker} @ {buy_ask:.2f}\n"
+                f"Credit: {credit:.0f}  Width: {width:.0f}  ROC: {roc:.1%}\n"
+                f"Warning: {warning}",
+                roc, warning)
+
+        if sell_bid < 1 and buy_ask < 1:
+            warning = "Very low prices — wide relative spread"
+
+        grade = "A" if roc >= 0.15 and min_volume > 100 and itm_depth < 0.02 else \
+                "B" if roc >= 0.05 else \
+                "C" if roc >= 0.02 else "F"
+
+        tag = "OTM spread" if itm_depth < 0.02 else \
+              "Near ATM spread" if itm_depth < 0.05 else \
+              "ITM spread"
+
+        summary = f"{strat} {sell_leg.strike:.0f}/{buy_leg.strike:.0f}  credit={credit:.0f}  roc={roc:.0%}"
+        detail = (f"Sell {sell_leg.ticker} @ {sell_bid:.2f}\n"
+                  f"Buy  {buy_leg.ticker} @ {buy_ask:.2f}\n"
+                  f"Credit: {credit:.0f}  Width: {width:.0f}  ROC: {roc:.1%}")
+        if warning:
+            detail += f"\nWarning: {warning}"
+
+        return Assessment(grade, tag, summary, detail, roc, warning)
+
+    if strat == "iron_condor":
+        net_credit = metrics.get("net_credit", 0)
+        max_loss = metrics.get("max_loss", 1)
+        roc = net_credit / max_loss if max_loss > 0 else 0
+
+        if net_credit <= 0:
+            return Assessment("F", "No credit", "Iron condor — net credit is zero or negative", "", 0, "No credit")
+
+        grade = "A" if roc >= 0.25 and min_volume > 100 else \
+                "B" if roc >= 0.15 else \
+                "C" if roc >= 0.05 else "F"
+
+        summary = f"Iron Condor  credit={net_credit:.0f}  max_loss={max_loss:.0f}  roc={roc:.0%}"
+        detail_lines = []
+        for l in legs:
+            where = " (short)" if l.side == "SELL" else " (long)"
+            detail_lines.append(f"  {l.side:4s} {l.ticker}  strike={l.strike:.0f}  {l.right:4s}{where}")
+        detail_lines.append(f"Net credit: {net_credit:.0f}  Max loss: {max_loss:.0f}  ROC: {roc:.1%}")
+        detail = "\n".join(detail_lines)
+        tag = "OTM iron condor" if roc >= 0.20 else "Iron condor"
+        return Assessment(grade, tag, summary, detail, roc, "")
+
+    if strat == "mariposa":
+        cost = metrics.get("cost", 0)
+        width = metrics.get("width", 1)
+        ratio = metrics.get("ratio", 1)
+        roc = 1.0 - ratio if ratio <= 1 else 0
+
+        if cost <= 0 or ratio <= 0:
+            return Assessment("F", "No cost",
+                f"Mariposa — cost={cost:.0f} ratio={ratio:.3f} — invalid",
+                "", 0, "Invalid parameters")
+
+        grade = "B" if roc >= 0.5 and min_volume > 50 else \
+                "C" if roc >= 0.3 else "F"
+
+        summary = f"Mariposa  cost={cost:.0f}  width={width:.0f}  roc={roc:.0%}"
+        detail_lines = []
+        for l in legs:
+            detail_lines.append(f"  {l.side:4s} {l.ticker} x{l.qty}  strike={l.strike:.0f}")
+        detail_lines.append(f"Cost: {cost:.0f}  Width: {width:.0f}  ROC: {roc:.1%}")
+        tag = "Call butterfly"
+        return Assessment(grade, tag, summary, "\n".join(detail_lines), roc, "")
+
+    if strat == "synthetic":
+        cost = metrics.get("cost", 0)
+        spot = metrics.get("spot", 0)
+        strike = metrics.get("strike", 0)
+        confidence = opp.confidence
+
+        near_spot = abs(strike - spot) / max(spot, 1) < 0.10
+        min_vol = min((l.bid + l.ask) for l in legs if l.bid > 0 and l.ask > 0)
+
+        if not near_spot:
+            return Assessment("F", "Far OTM",
+                f"Synthetic @ {strike:.0f} — far from spot {spot:.0f}, arb vanishes on execution",
+                f"Strike {strike:.0f} is far from spot {spot:.0f}. "
+                f"The put-call parity arb disappears in bid-ask friction.", confidence, "Far from spot")
+
+        grade = "C" if min_vol > 50 else "F"
+        tag = "ATM synthetic" if grade == "C" else "Low liquidity synthetic"
+
+        summary = f"Synthetic {opp.side} @ {strike:.0f}  cost={cost:.2f}  conf={confidence:.3f}"
+        detail_lines = []
+        for l in legs:
+            detail_lines.append(f"  {l.side:4s} {l.ticker}  strike={l.strike:.0f}  {l.right:4s}")
+        detail_lines.append(f"Cost: {cost:.2f}  Spot: {spot:.0f}  Strike: {strike:.0f}")
+        detail_lines.append(f"Note: Synthetic arbs require spread execution — legging risk")
+        return Assessment(grade, tag, summary, "\n".join(detail_lines), confidence, "")
+
+    if strat == "calendar":
+        cost = metrics.get("cost", 0)
+        near_dte = metrics.get("near_dte", 0)
+        far_dte = metrics.get("far_dte", 0)
+        return Assessment("C", "Calendar spread",
+            f"Calendar {near_dte}d/{far_dte}d  cost={cost:.0f}",
+            f"Sell {near_dte} DTE, buy {far_dte} DTE. Cost: {cost:.0f}",
+            0, "Calendar spreads not fully validated")
+
+    return Assessment("F", "Unknown", f"Unknown strategy: {strat}", "", 0, "")
+
+
+def assess_all(opps: list[Opportunity]) -> list[tuple[Opportunity, Assessment]]:
+    result = [(opp, assess_opportunity(opp)) for opp in opps]
+    grade_order = {"A": 0, "B": 1, "C": 2, "F": 3}
+    result.sort(key=lambda x: (grade_order.get(x[1].grade, 9), -x[1].roc))
+    return result
+
+
+def grade_counts(assessed: list[tuple[Opportunity, Assessment]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for _, a in assessed:
+        counts[a.grade] = counts.get(a.grade, 0) + 1
+    return counts

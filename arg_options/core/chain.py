@@ -120,7 +120,12 @@ def build_full_chain(
 
             mid = (bid + ask) / 2 if bid > 0 and ask > 0 else last
 
-            strike = raw_strike / 100.0
+            strike = raw_strike / 10.0
+
+            intrinsic = max(0, (spot - strike) if right == "C" else (strike - spot))
+            if mid > 0 and intrinsic > 0 and mid < intrinsic * 0.9:
+                logger.warning(f"Skipping {instr.ticker}: mid={mid:.2f} < intrinsic={intrinsic:.2f} (spot={spot}, strike={strike})")
+                continue
 
             greeks: dict[str, float] = {}
             if mid > 0 and T > 0:
